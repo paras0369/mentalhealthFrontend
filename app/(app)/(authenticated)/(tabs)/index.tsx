@@ -62,38 +62,48 @@ const Page = () => {
   // --- Callback Functions ---
 
   // Function to fetch the logged-in therapist's own status
-  // TODO: Replace this temporary workaround with a dedicated GET /therapists/me backend endpoint
   const fetchTherapistSelfStatus = useCallback(async () => {
-    console.warn(
-      "Therapist self-status fetching needs a dedicated backend endpoint (GET /therapists/me). Using temporary workaround."
-    );
-    setStatusUpdateError(null);
-    // For now, just set a default - replace with actual fetch logic later
-    setTherapistStatus(false); // Assume offline until fetched properly
-    // --- Start Placeholder Fetch Logic (REMOVE/REPLACE LATER) ---
-    // This logic is inefficient and unreliable
-    /*
-   try {
-       const response = await fetch(`${API_URL}/therapists/available`, {
-           headers: { 'Authorization': `Bearer ${authState.jwt}` },
-       });
-       if (!response.ok) throw new Error('Failed to fetch status');
-       const allAvailable: Therapist[] = await response.json();
-       const self = allAvailable.find(t => t.streamId === authState.streamId);
-       if (self) {
-           setTherapistStatus(self.isAvailable);
-       } else {
-           // If not available, might be offline - need a way to get the actual status
-           setTherapistStatus(false); // Assume offline if not in available list
-       }
-   } catch (err: any) {
-       console.error("Error fetching self status (workaround):", err);
-       setStatusUpdateError("Could not load your current status.");
-       setTherapistStatus(false); // Default to false on error
-   }
-   */
-    // --- End Placeholder Fetch Logic ---
-  }, [authState.jwt, authState.streamId]);
+    if (!authState.jwt) return; // Ensure JWT is available
+
+    console.log("Fetching self status for therapist via /therapists/me");
+    setStatusUpdateError(null); // Clear previous errors
+
+    try {
+      const response = await fetch(`${API_URL}/therapists/me`, {
+        headers: {
+          Authorization: `Bearer ${authState.jwt}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        let errorMsg = `HTTP error! status: ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorMsg = errorData.message || errorMsg;
+        } catch (_) {} // Ignore parsing error
+        throw new Error(errorMsg);
+      }
+
+      const selfData = await response.json();
+      console.log("Fetched self status data:", selfData);
+
+      if (typeof selfData.isAvailable === "boolean") {
+        setTherapistStatus(selfData.isAvailable);
+      } else {
+        console.warn(
+          "isAvailable field missing or not a boolean in /therapists/me response."
+        );
+        setTherapistStatus(false); // Fallback
+      }
+    } catch (err: any) {
+      console.error("Error fetching self status:", err);
+      setStatusUpdateError(
+        err.message || "Could not load your current status."
+      );
+      setTherapistStatus(false); // Fallback on error
+    }
+  }, [authState.jwt]);
 
   // Function to fetch the list of available therapists (for Client View)
   const fetchAvailableTherapists = useCallback(async () => {
