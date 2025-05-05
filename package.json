@@ -18,9 +18,7 @@
     "package": "com.mentalhealth.app",
     "permissions": [
       "android.permission.CAMERA",
-      "android.permission.RECORD_AUDIO",
-      "android.permission.MODIFY_AUDIO_SETTINGS",
-      "android.permission.ACCESS_NETWORK_STATE"
+      "android.permission.RECORD_AUDIO"
     ]
   },
   "dependencies": {
@@ -35,9 +33,11 @@
     "@stream-io/react-native-webrtc": "^125.0.8",
     "@stream-io/video-react-native-sdk": "^1.11.3",
     "expo": "~52.0.46",
+    "expo-av": "~15.0.2",
     "expo-blur": "~14.0.3",
     "expo-build-properties": "~0.13.2",
     "expo-constants": "~17.0.8",
+    "expo-crypto": "~14.0.2",
     "expo-dev-client": "~5.0.20",
     "expo-document-picker": "~13.0.3",
     "expo-file-system": "~18.0.12",
@@ -65,6 +65,7 @@
     "react-native-gesture-handler": "~2.20.2",
     "react-native-incall-manager": "^4.2.0",
     "react-native-modal-datetime-picker": "^18.0.0",
+    "react-native-permissions": "^5.4.0",
     "react-native-reanimated": "~3.16.1",
     "react-native-safe-area-context": "4.12.0",
     "react-native-screens": "~4.4.0",
@@ -73,9 +74,33 @@
     "react-native-webview": "13.12.5",
     "stream-chat-expo": "^6.7.2",
     "tailwindcss": "3.x",
-    "zod": "^3.24.3",
-    "expo-av": "~15.0.2",
-    "expo-crypto": "~14.0.2"
+    "zod": "^3.24.3"
+  },
+  "expo": {
+    "name": "Awesome app",
+    "plugins": [
+      [
+        "react-native-permissions",
+        {
+          "iosPermissions": [
+            "Camera",
+            "Microphone"
+          ]
+        }
+      ]
+    ],
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "[REASON]",
+        "NSMicrophoneUsageDescription": "[REASON]"
+      }
+    },
+    "android": {
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
+    }
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
