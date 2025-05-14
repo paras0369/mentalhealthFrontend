@@ -1,177 +1,347 @@
+// app/(app)/(authenticated)/consultation/[id].tsx
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
-  Call,
-  StreamCall,
-  useStreamVideoClient,
-  CallingState,
-  CallContent,
-} from "@stream-io/video-react-native-sdk";
-import { useEffect, useState, useCallback } from "react"; // Added useCallback
-import { useLocalSearchParams, useRouter, Stack } from "expo-router";
+  useLocalSearchParams,
+  useRouter,
+  Stack,
+  useFocusEffect,
+} from "expo-router";
 import {
   View,
   Text,
-  PermissionsAndroid,
   ActivityIndicator,
   Alert,
-} from "react-native"; // Added ActivityIndicator, Alert
+  StyleSheet,
+  TouchableOpacity,
+  AppState,
+} from "react-native";
+import {
+  StreamCall,
+  Call,
+  useStreamVideoClient,
+  CallContent,
+  CallingState, // To observe call state
+  // useCall, // Can be used inside CallContent's children if needed
+  // useCallStateHooks, // Can be used for more granular state if CallContent isn't enough
+} from "@stream-io/video-react-native-sdk";
 import { CustomCallControls } from "@/components/CustomCallControls";
-import { useAuth } from "@/providers/AuthProvider";
-import React from "react";
+// import { useAuth } from "@/providers/AuthProvider"; // Only if therapist-specific actions within call needed
 
-// PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS); // Keep commented unless setting up notifications
+const LOG_PREFIX = "ConsultationPage";
 
-const ConsultationCallPage = () => {
-  const { id: callIdFromRoute } = useLocalSearchParams<{ id: string }>();
-  const [call, setCall] = useState<Call | null>(null);
+const ConsultationPage = () => {
+  const {
+    id: callIdFromRoute,
+    initialCallMode = "video", // Default to "video"
+    // isInitiator, // Optional: if you want different behavior for caller vs callee on this screen
+  } = useLocalSearchParams<{
+    id: string;
+    initialCallMode?: "audio" | "video";
+    // isInitiator?: "true" | "false";
+  }>();
+
   const router = useRouter();
-  const client = useStreamVideoClient();
-  const { authState, isTherapist } = useAuth(); // Get authState for user ID if needed later
+  const videoClient = useStreamVideoClient();
 
-  // --- Join/Create Stream Call Effect ---
+  const [callObject, setCallObject] = useState<Call | null>(null);
+  const [currentCallingState, setCurrentCallingState] = useState<CallingState>(
+    CallingState.UNKNOWN
+  );
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const callStateSubscription = useRef<any>(null); // To store subscription
+
+  const log = useCallback(
+    (
+      level: "log" | "warn" | "error",
+      context: string,
+      message: string,
+      ...args: any[]
+    ) => {
+      const fullMessage = `[${LOG_PREFIX}:${context}${
+        callIdFromRoute ? `:${callIdFromRoute}` : ""
+      }] ${message}`;
+      console[level](fullMessage, ...args);
+    },
+    [callIdFromRoute]
+  );
+
+  // --- Effect to Setup and Join the Call ---
   useEffect(() => {
-    if (!client || !callIdFromRoute) {
-      console.log("Video Call Screen: Client not ready or Call ID missing.");
-      return;
-    }
-    // Check if already connected to this call to prevent rejoining loops
-    if (call && call.id === callIdFromRoute) {
-      console.log("Video Call Screen: Already managing call", callIdFromRoute);
+    if (!videoClient || !callIdFromRoute) {
+      log("warn", "SetupCallEffect", "Video client or call ID missing.");
+      setError("Required information to join the call is missing.");
+      setIsLoading(false);
       return;
     }
 
-    console.log(
-      `Video Call Screen: Attempting to join/create call with ID: ${callIdFromRoute}`
-    );
-    const currentCall = client.call("default", callIdFromRoute);
+    let unmounted = false;
+    let currentCallInstance: Call | null = null;
 
-    currentCall
-      .join({ create: true })
-      .then(() => {
-        console.log(`Successfully joined call ${callIdFromRoute}`);
-        setCall(currentCall); // Set the active call object
+    const initializeAndJoinCall = async () => {
+      log(
+        "log",
+        "SetupCallEffect",
+        `Initializing call object for ID: ${callIdFromRoute}`
+      );
+      // Use a generic call type or the one you expect
+      currentCallInstance = videoClient.call("default", callIdFromRoute);
+      setCallObject(currentCallInstance); // Set call object for StreamCall provider
 
-        if (isTherapist) {
-          console.log(
-            "Therapist joined, attempting to start recording/transcription..."
-          );
-          currentCall
-            .startRecording()
-            .catch((err) => console.error("Failed to start recording:", err));
-          currentCall
-            .startTranscription()
-            .catch((err) =>
-              console.error("Failed to start transcription:", err)
+      // Subscribe to call state changes
+      if (callStateSubscription.current)
+        callStateSubscription.current.unsubscribe();
+      callStateSubscription.current =
+        currentCallInstance.state.callingState$.subscribe((newState) => {
+          if (unmounted) return;
+          log("log", "CallStateUpdate", `Call state changed to: ${newState}`);
+          setCurrentCallingState(newState);
+          if (newState === CallingState.LEFT) {
+            // If call ended externally or by other means
+            log(
+              "log",
+              "CallStateUpdate",
+              "Call LEFT. Navigating back or home."
+            );
+            if (router.canGoBack()) router.back();
+            else router.replace("/");
+          }
+        });
+
+      try {
+        log(
+          "log",
+          "SetupCallEffect",
+          `Attempting to join call: ${currentCallInstance.id}`
+        );
+        // Attempt to join. If already joined (e.g., by RingingCallContent), this should be quick.
+        // 'create: false' is safer if we assume RingingCallContent created it.
+        // If this page can be entered for a call that might not exist yet, use 'create: true'.
+        // For simplicity with RingingCallContent handling creation:
+        await currentCallInstance.join({
+          create: callIdFromRoute === currentCallInstance.id,
+        }); // create if this component is the one "creating" it by ID
+
+        if (unmounted) return;
+        log(
+          "log",
+          "SetupCallEffect",
+          `Successfully joined call: ${currentCallInstance.id}`
+        );
+        setIsLoading(false);
+        setError(null);
+
+        // Apply initial audio/video settings based on mode
+        if (initialCallMode === "audio" && currentCallInstance.camera.enabled) {
+          log("log", "SetupCallEffect", "Audio mode: Disabling camera.");
+          await currentCallInstance.camera.disable();
+        } else if (
+          initialCallMode === "video" &&
+          !currentCallInstance.camera.enabled
+        ) {
+          log("log", "SetupCallEffect", "Video mode: Enabling camera.");
+          await currentCallInstance.camera.enable();
+        }
+      } catch (err: any) {
+        log(
+          "error",
+          "SetupCallEffect",
+          `Failed to join call ${currentCallInstance?.id}:`,
+          err
+        );
+        if (!unmounted) {
+          setError(err.message || "Failed to join the call.");
+          setIsLoading(false);
+          setCallObject(null); // Clear call object on error
+        }
+      }
+    };
+
+    initializeAndJoinCall();
+
+    return () => {
+      unmounted = true;
+      log(
+        "log",
+        "CleanupEffect",
+        `Unmounting ConsultationPage for call ${currentCallInstance?.id}.`
+      );
+      if (callStateSubscription.current) {
+        callStateSubscription.current.unsubscribe();
+        callStateSubscription.current = null;
+      }
+      // Leaving the call on unmount is often NOT desired if user just backgrounds app.
+      // Explicit hangup is usually better.
+      // currentCallInstance?.leave().catch(e => log("error", "CleanupEffect", "Error leaving on unmount", e));
+    };
+  }, [videoClient, callIdFromRoute, initialCallMode, log, router]); // router added for navigation in subscription
+
+  // --- App State Handling (Optional but good for camera/mic management) ---
+  useEffect(() => {
+    const handleAppStateChange = async (nextAppState: string) => {
+      if (!callObject || callObject.state.callingState !== CallingState.JOINED)
+        return;
+
+      log("log", "AppStateChange", `App state: ${nextAppState}`);
+      if (initialCallMode === "video") {
+        // Only manage camera for video calls
+        if (nextAppState === "background" && callObject.camera.enabled) {
+          log("log", "AppStateChange", "App backgrounded, disabling camera.");
+          await callObject.camera
+            .disable()
+            .catch((e) =>
+              log(
+                "warn",
+                "AppStateChange",
+                "Error disabling camera on background",
+                e
+              )
+            );
+        } else if (nextAppState === "active" && !callObject.camera.enabled) {
+          log("log", "AppStateChange", "App active, re-enabling camera.");
+          await callObject.camera
+            .enable()
+            .catch((e) =>
+              log(
+                "warn",
+                "AppStateChange",
+                "Error enabling camera on active",
+                e
+              )
             );
         }
-      })
-      .catch((err) => {
-        console.error(`Failed to join call ${callIdFromRoute}:`, err);
-        Alert.alert(
-          "Error Joining Call",
-          err?.message || "Could not connect to the call.",
-          [
-            {
-              text: "OK",
-              onPress: () => {
-                if (router.canGoBack()) router.back();
-                else router.replace("/");
-              },
-            },
-          ]
-        );
-      });
-
-    // Set call instance immediately to potentially allow early state reading if needed
-    // setCall(currentCall); // Be cautious with setting state before promise resolves
-
-    // --- Call Leave Cleanup ---
-    return () => {
-      // IMPORTANT: Use a function form of setCall to access the correct 'currentCall' instance
-      // bound to this specific effect invocation, avoiding stale state issues in cleanup.
-      setCall((prevCall) => {
-        // Check if the call instance we are trying to clean up is the one currently in state
-        if (
-          prevCall &&
-          prevCall.id === currentCall.id &&
-          prevCall.state.callingState !== CallingState.LEFT
-        ) {
-          console.log(`useEffect cleanup: Leaving call ${currentCall.id}...`);
-          if (isTherapist) {
-            currentCall
-              .stopRecording()
-              .catch((err) =>
-                console.error("Cleanup: Error stopping recording:", err)
-              );
-            currentCall
-              .stopTranscription()
-              .catch((err) =>
-                console.error("Cleanup: Error stopping transcription:", err)
-              );
-          }
-          currentCall
-            .leave()
-            .catch((err) => console.error("Cleanup: Error leaving call:", err));
-          return null; // Clear the call state after initiating leave
-        }
-        return prevCall; // Keep existing state if it's not the call from this effect run
-      });
+      }
     };
-  }, [client, callIdFromRoute, isTherapist]); // Rerun if client or call ID changes
+    const subscription = AppState.addEventListener(
+      "change",
+      handleAppStateChange
+    );
+    return () => subscription.remove();
+  }, [callObject, initialCallMode, log]);
 
-  // --- Custom Hangup Handler ---
-  const handleHangup = useCallback(() => {
-    console.log("Hangup button pressed. Initiating navigation back...");
-    // ONLY navigate back. The useEffect cleanup will handle leaving the call
-    // when the component unmounts due to navigation.
-    if (router.canGoBack()) {
-      console.log("Navigating back.");
-      router.back();
-    } else {
-      console.log("Cannot go back, replacing with home.");
-      router.replace("/"); // Replace with home or appropriate default screen
+  // --- User-initiated Hangup ---
+  const handleHangup = useCallback(async () => {
+    log("log", "HandleHangup", "User initiated hangup.");
+    setIsLoading(true); // Show loading while leaving
+    try {
+      await callObject?.leave();
+      log("log", "HandleHangup", "Successfully left call.");
+      // Navigation will be handled by the state subscription detecting LEFT state
+    } catch (e) {
+      log("error", "HandleHangup", "Error leaving call:", e);
+      // Still navigate back even if leave fails locally
+      if (router.canGoBack()) router.back();
+      else router.replace("/");
+    } finally {
+      // setIsLoading(false); // State subscription will clear the screen
     }
-  }, [router]); // Only depends on router now
+  }, [callObject, router, log]);
 
   // --- Render Logic ---
-
-  // Show loading state until the call object is successfully joined and set in state
-  if (
-    !call ||
-    call.state.callingState === CallingState.JOINING ||
-    call.state.callingState === CallingState.UNKNOWN ||
-    call.state.callingState === CallingState.IDLE
-  ) {
-    // Added more states to cover the joining process
+  if (isLoading) {
     return (
-      <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+      <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#007BFF" />
-        <Text style={{ marginTop: 10, color: "grey", fontSize: 16 }}>
-          {call?.state.callingState === CallingState.JOINING
+        <Text style={styles.statusText}>
+          {currentCallingState === CallingState.JOINING
             ? "Joining Call..."
-            : "Connecting..."}
+            : "Loading Call..."}
         </Text>
-        {/* Set a static title while loading */}
         <Stack.Screen options={{ title: "Connecting..." }} />
       </View>
     );
   }
 
-  // Render the Stream Call UI once the call object is ready and joined
+  if (error) {
+    return (
+      <View style={styles.centerContainer}>
+        <Text style={styles.errorText}>Error: {error}</Text>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace("/")
+          }
+        >
+          <Text style={styles.buttonText}>Go Back</Text>
+        </TouchableOpacity>
+        <Stack.Screen options={{ title: "Error" }} />
+      </View>
+    );
+  }
+
+  if (
+    !callObject ||
+    currentCallingState === CallingState.LEFT ||
+    currentCallingState === CallingState.UNKNOWN
+  ) {
+    // If call ended, or couldn't be established properly, show an ended/error message
+    // The subscription to LEFT state should navigate away, but this is a fallback.
+    log(
+      "log",
+      "Render",
+      `Call object null or state is ${currentCallingState}. Showing ended/fallback.`
+    );
+    return (
+      <View style={styles.centerContainer}>
+        <Text style={styles.statusText}>
+          {currentCallingState === CallingState.LEFT
+            ? "Call has ended."
+            : "Could not establish call."}
+        </Text>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace("/")
+          }
+        >
+          <Text style={styles.buttonText}>Go Home</Text>
+        </TouchableOpacity>
+        <Stack.Screen options={{ title: "Call Ended" }} />
+      </View>
+    );
+  }
+
+  // Render the main call UI
+  log(
+    "log",
+    "Render",
+    `Rendering StreamCall for ${callObject.id}, current state: ${currentCallingState}`
+  );
   return (
-    <View style={{ flex: 1 }}>
-      {/* Set title dynamically once call is active */}
-      <Stack.Screen options={{ title: `Call Active` }} />
-      {/* Provide the active call instance to StreamCall context */}
-      <StreamCall call={call}>
+    <View style={styles.container}>
+      <Stack.Screen options={{ title: `Call: ${initialCallMode}` }} />
+      <StreamCall call={callObject}>
         <CallContent
-          layout="spotlight" // Or 'grid', 'speaker'
-          // --- Pass the custom hangup handler ---
           onHangupCallHandler={handleHangup}
-          // --- Use your custom controls ---
-          CallControls={CustomCallControls}
+          CallControls={(props) => (
+            <CustomCallControls {...props} callMode={initialCallMode} />
+          )}
+          // layout="grid" // or "spotlight" or remove for default
         />
       </StreamCall>
     </View>
   );
 };
-export default ConsultationCallPage;
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "black" },
+  centerContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+    backgroundColor: "white",
+  },
+  statusText: { marginTop: 10, fontSize: 16, color: "grey" },
+  errorText: { marginTop: 10, fontSize: 16, color: "red", textAlign: "center" },
+  button: {
+    marginTop: 20,
+    backgroundColor: "#007AFF",
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 5,
+  },
+  buttonText: { color: "white", fontSize: 16, fontWeight: "bold" },
+});
+
+export default ConsultationPage;

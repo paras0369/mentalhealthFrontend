@@ -1,3 +1,5 @@
+// app/(app)/(authenticated)/(tabs)/index.tsx
+import React, { useState, useCallback, useEffect } from "react";
 import {
   View,
   Text,
@@ -10,22 +12,17 @@ import {
   Alert,
 } from "react-native";
 import { MaterialIcons } from "@expo/vector-icons";
-import { Link, useFocusEffect, useRouter } from "expo-router";
-import { useState, useCallback, useEffect } from "react";
-import { useAuth } from "@/providers/AuthProvider";
-import { API_URL } from "@/providers/AuthProvider"; // Assuming API_URL is exported from AuthProvider
-import React from "react";
-import { useChatContext } from "stream-chat-expo"; // Keep for chat button logic
-import { useStreamVideoClient } from "@stream-io/video-react-native-sdk"; // Import hook for video client
-import * as Crypto from "expo-crypto"; // Import expo-crypto for UUID generation
+import { useFocusEffect, useRouter } from "expo-router";
+import { useAuth, API_URL } from "@/providers/AuthProvider";
+import { useStreamVideoClient } from "@stream-io/video-react-native-sdk";
+import * as Crypto from "expo-crypto";
 
 // Define an interface for the Therapist data received from backend
 interface Therapist {
   id: string; // MongoDB ID (_id)
-  name: string; // email for now
-  streamId: string; // Stream ID for chat/call
+  name: string; // email for now, or actual name
+  streamId: string; // Stream ID for call
   isAvailable: boolean;
-  // Add other fields like specialties, photoUrl later
 }
 
 // Interface for the therapist's own user data (can be expanded)
@@ -34,40 +31,36 @@ interface TherapistSelfData {
   // Add earnings balance, etc. later
 }
 
-const Page = () => {
-  // --- Hooks ---
+const HomeScreen = () => {
   const { authState, isTherapist } = useAuth();
   const router = useRouter();
-  const { client: chatClient } = useChatContext(); // Get Stream Chat client instance for chat button
-  const videoClient = useStreamVideoClient(); // Get Stream Video client instance for call button
+  const videoClient = useStreamVideoClient();
 
   // --- State Variables ---
-  // State for client view (listing therapists)
   const [therapists, setTherapists] = useState<Therapist[]>([]);
   const [isLoadingTherapists, setIsLoadingTherapists] = useState(false);
   const [therapistListError, setTherapistListError] = useState<string | null>(
     null
   );
   const [refreshing, setRefreshing] = useState(false);
-  const [isCreatingChat, setIsCreatingChat] = useState<string | null>(null); // Track which chat button is loading
-  const [isInitiatingCall, setIsInitiatingCall] = useState<string | null>(null); // Track which call button is loading
+  const [isInitiatingCall, setIsInitiatingCall] = useState<string | null>(
+    null // Stores therapist.id + callMode
+  );
 
-  // State for therapist view (dashboard)
-  const [therapistStatus, setTherapistStatus] = useState<boolean>(false); // Therapist's own availability
-  const [isUpdatingStatus, setIsUpdatingStatus] = useState<boolean>(false); // Loading state for availability toggle
+  const [therapistStatus, setTherapistStatus] = useState<boolean>(false);
+  const [isUpdatingStatus, setIsUpdatingStatus] = useState<boolean>(false);
   const [statusUpdateError, setStatusUpdateError] = useState<string | null>(
     null
-  ); // Error state for availability toggle
+  );
 
-  // --- Callback Functions ---
-
-  // Function to fetch the logged-in therapist's own status
+  // --- API Callbacks ---
   const fetchTherapistSelfStatus = useCallback(async () => {
-    if (!authState.jwt) return; // Ensure JWT is available
-
-    console.log("Fetching self status for therapist via /therapists/me");
-    setStatusUpdateError(null); // Clear previous errors
-
+    if (!authState.jwt || !isTherapist) return;
+    console.log(
+      "[HomeScreen] fetchTherapistSelfStatus: Fetching self status..."
+    );
+    setIsUpdatingStatus(true);
+    setStatusUpdateError(null);
     try {
       const response = await fetch(`${API_URL}/therapists/me`, {
         headers: {
@@ -75,81 +68,68 @@ const Page = () => {
           "Content-Type": "application/json",
         },
       });
-
       if (!response.ok) {
-        let errorMsg = `HTTP error! status: ${response.status}`;
-        try {
-          const errorData = await response.json();
-          errorMsg = errorData.message || errorMsg;
-        } catch (_) {} // Ignore parsing error
-        throw new Error(errorMsg);
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(
+          errorData.message || `HTTP error! status: ${response.status}`
+        );
       }
-
-      const selfData = await response.json();
-      console.log("Fetched self status data:", selfData);
-
+      const selfData: TherapistSelfData & { email: string } = // Assuming email is still part of the response
+        await response.json();
+      console.log(
+        "[HomeScreen] fetchTherapistSelfStatus: Fetched self status data:",
+        selfData
+      );
       if (typeof selfData.isAvailable === "boolean") {
         setTherapistStatus(selfData.isAvailable);
       } else {
-        console.warn(
-          "isAvailable field missing or not a boolean in /therapists/me response."
-        );
-        setTherapistStatus(false); // Fallback
+        // Default to false if isAvailable is not a boolean or missing
+        setTherapistStatus(false);
       }
     } catch (err: any) {
-      console.error("Error fetching self status:", err);
+      console.error("[HomeScreen] fetchTherapistSelfStatus: Error:", err);
       setStatusUpdateError(
         err.message || "Could not load your current status."
       );
-      setTherapistStatus(false); // Fallback on error
+      setTherapistStatus(false); // Reset on error
+    } finally {
+      setIsUpdatingStatus(false);
     }
-  }, [authState.jwt]);
+  }, [authState.jwt, isTherapist]);
 
-  // Function to fetch the list of available therapists (for Client View)
   const fetchAvailableTherapists = useCallback(async () => {
-    if (isTherapist) return; // Don't fetch list if user is a therapist
-    console.log("Fetching available therapists...");
+    if (isTherapist || !authState.jwt) return;
+    console.log("[HomeScreen] fetchAvailableTherapists: Fetching...");
     setIsLoadingTherapists(true);
     setTherapistListError(null);
-
     try {
       const response = await fetch(`${API_URL}/therapists/available`, {
-        headers: {
-          Authorization: `Bearer ${authState.jwt}`, // Use the JWT token
-          "Content-Type": "application/json",
-        },
+        headers: { Authorization: `Bearer ${authState.jwt}` },
       });
-
       if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
         throw new Error(
-          `HTTP error! status: ${response.status} - ${
-            response.statusText || "Failed to fetch"
-          }`
+          errorData.message || `HTTP error! status: ${response.status}`
         );
       }
-
       const data: Therapist[] = await response.json();
-      console.log("Fetched therapists:", data);
+      console.log("[HomeScreen] fetchAvailableTherapists: Count:", data.length);
       setTherapists(data);
     } catch (err: any) {
-      console.error("Error fetching available therapists:", err);
-      setTherapistListError(
-        err.message || "Failed to load therapists. Please try again."
-      );
-      setTherapists([]); // Clear therapists on error
+      console.error("[HomeScreen] fetchAvailableTherapists: Error:", err);
+      setTherapistListError(err.message || "Failed to load therapists.");
+      setTherapists([]);
     } finally {
       setIsLoadingTherapists(false);
     }
   }, [authState.jwt, isTherapist]);
 
-  // Function for Therapist to toggle their own availability
   const toggleAvailability = useCallback(
     async (newValue: boolean) => {
-      if (!authState.jwt) return; // Need JWT
-      console.log(`Toggling availability to: ${newValue}`);
+      if (!authState.jwt || !isTherapist) return;
+      console.log(`[HomeScreen] toggleAvailability: Setting to: ${newValue}`);
       setIsUpdatingStatus(true);
       setStatusUpdateError(null);
-
       try {
         const response = await fetch(`${API_URL}/therapists/me/availability`, {
           method: "PATCH",
@@ -159,184 +139,207 @@ const Page = () => {
           },
           body: JSON.stringify({ isAvailable: newValue }),
         });
-
-        const responseData = await response.json(); // Read response body
-
+        const responseData = await response.json();
         if (!response.ok) {
           throw new Error(
             responseData.message || `HTTP error! status: ${response.status}`
           );
         }
-
-        console.log("Availability updated successfully via API:", responseData);
-        setTherapistStatus(responseData.isAvailable); // Update state from successful API response
+        console.log("[HomeScreen] toggleAvailability: Success:", responseData);
+        setTherapistStatus(responseData.isAvailable);
       } catch (err: any) {
-        console.error("Error updating availability:", err);
+        console.error("[HomeScreen] toggleAvailability: Error:", err);
         setStatusUpdateError(err.message || "Failed to update status.");
-        // Revert UI optimistically if needed: setTherapistStatus(!newValue);
+        // Revert UI on error
+        setTherapistStatus((prev) => !prev);
       } finally {
         setIsUpdatingStatus(false);
       }
     },
-    [authState.jwt]
+    [authState.jwt, isTherapist]
   );
 
-  // Function for Client to initiate a Chat
-  const handleChatPress = useCallback(
-    async (therapist: Therapist) => {
-      if (!chatClient || !authState.streamId) {
+  // --- Call Initiation ---
+  const initiateCall = useCallback(
+    async (therapist: Therapist, callMode: "audio" | "video") => {
+      console.log(
+        `[HomeScreen] initiateCall to therapist StreamID: ${therapist.streamId}, Mode: ${callMode}`
+      );
+      if (!videoClient) {
         Alert.alert(
           "Error",
-          "Chat client not ready or user not authenticated."
+          "Video service is not available. Please try again later."
+        );
+        console.error(
+          "[HomeScreen] initiateCall: videoClient is not available."
         );
         return;
       }
-      if (isCreatingChat || isInitiatingCall) return; // Prevent action if busy
-
-      console.log(
-        `Initiating chat with ${therapist.name} (Stream ID: ${therapist.streamId})`
-      );
-      setIsCreatingChat(therapist.id); // Set loading state for this specific therapist item
-
-      try {
-        const currentUserStreamId = authState.streamId;
-        const therapistStreamId = therapist.streamId;
-        const plainChannelId = [currentUserStreamId, therapistStreamId]
-          .sort()
-          .join("-");
-        const channel = chatClient.channel("messaging", plainChannelId, {
-          name: `Chat with ${therapist.name}`,
-          members: [currentUserStreamId, therapistStreamId],
-        });
-        await channel.watch();
-        console.log(`Channel watched/created: ${channel.cid}`);
-        console.log(`Navigating to route: /chat/${plainChannelId}`);
-        router.push(`/chat/${plainChannelId}`); // Navigate using plain ID
-      } catch (error: any) {
-        console.error("Error initiating chat:", error);
-        Alert.alert("Error", `Could not start chat. ${error?.message || ""}`);
-      } finally {
-        setIsCreatingChat(null); // Clear loading state
-      }
-    },
-    [chatClient, authState.streamId, router, isCreatingChat, isInitiatingCall]
-  ); // Add all relevant dependencies
-
-  // Function for Client to initiate a Call (using Stream Ringing)
-  const handleCallPress = useCallback(
-    async (therapist: Therapist) => {
-      if (
-        !videoClient ||
-        !authState.streamId ||
-        !authState.userId ||
-        !authState.email
-      ) {
-        Alert.alert("Error", "Video client not ready or user details missing.");
+      if (!authState.streamId || !authState.email) {
+        Alert.alert("Error", "User authentication details are missing.");
+        console.error(
+          "[HomeScreen] initiateCall: Missing authState.streamId or authState.email."
+        );
         return;
       }
-      if (isInitiatingCall || isCreatingChat) return; // Prevent action if busy
-
-      console.log(
-        `Initiating RINGING call with ${therapist.name} (ID: ${therapist.id}, Stream ID: ${therapist.streamId})`
-      );
-      setIsInitiatingCall(therapist.id);
-
-      try {
-        // TODO: Check Client Credits (API call needed)
-
-        // Generate a unique Call ID (UUID)
-        const callId = Crypto.randomUUID();
-        console.log("Generated Call ID:", callId);
-
-        // Get the Stream Video Call object instance
-        const call = videoClient.call("default", callId);
-
-        // Create the call on the server and start ringing members
+      if (isInitiatingCall) {
         console.log(
-          `Creating/Ringing call ${callId} for members: ${authState.streamId}, ${therapist.streamId}`
+          "[HomeScreen] initiateCall: Another call initiation in progress."
         );
-        await call.getOrCreate({
-          ring: true, // Enable ringing
+        return;
+      }
+
+      setIsInitiatingCall(therapist.id + callMode);
+
+      const callId = Crypto.randomUUID();
+      const streamCallType = "default"; // Ensure this type is configured in your Stream Dashboard
+
+      try {
+        // Get a call object from the client.
+        const call = videoClient.call(streamCallType, callId);
+
+        // Define the settings for the call being created.
+        const callDataForRing = {
+          ring: true, // This makes the call ring for members.
           data: {
             members: [
-              { user_id: authState.streamId }, // Caller
-              { user_id: therapist.streamId }, // Callee
+              { user_id: authState.streamId! }, // Caller must be a member
+              { user_id: therapist.streamId },
             ],
             custom: {
-              // Store useful info
-              caller_id: authState.streamId,
-              caller_name: authState.email,
-              therapist_id: therapist.streamId,
-              therapist_mongo_id: therapist.id,
+              caller_id: authState.streamId!,
+              caller_name: authState.email!,
+              therapist_user_db_id: therapist.id, // Your backend DB ID
+              therapist_stream_id: therapist.streamId,
+              intended_call_mode: callMode,
+            },
+            settings_override: {
+              video: {
+                camera_default_on: callMode === "video",
+                enabled: callMode === "video",
+                target_resolution: { width: 640, height: 480 },
+              },
+              audio: {
+                mic_default_on: true,
+                default_device: "speaker" as const,
+              },
             },
           },
-          // notify: false, // Keep false until push notifications are set up
-        });
-        console.log(`Call ${callId} created and ringing.`);
+        };
 
-        // Navigate the client to the call screen
-        console.log(`Navigating client to /consultation/${callId}`);
-        router.push(`/consultation/${callId}`);
+        console.log(
+          `[HomeScreen] Calling call.getOrCreate() for ringing call ${callId} with data:`,
+          JSON.stringify(callDataForRing.data, null, 2)
+        );
+
+        await call.getOrCreate(callDataForRing);
+
+        console.log(`[HomeScreen] Ringing call ${callId} initiated.`);
+        // The global `RingingCalls` component will handle the UI for ringing/incoming call.
       } catch (error: any) {
-        console.error("Error initiating call:", error);
-        Alert.alert("Error", `Could not start call. ${error?.message || ""}`);
+        console.error(
+          "[HomeScreen] initiateCall: Error during call.getOrCreate():",
+          error
+        );
+        const streamErrorDetails = error.data || error.response?.data;
+        let alertMessage = "Could not initiate the call.";
+        if (streamErrorDetails?.message)
+          alertMessage = streamErrorDetails.message;
+        else if (error.message) alertMessage = error.message;
+        Alert.alert("Error Starting Call", alertMessage);
       } finally {
-        setIsInitiatingCall(null); // Clear loading state
+        setIsInitiatingCall(null);
       }
     },
-    [
-      videoClient,
-      authState.streamId,
-      authState.userId,
-      authState.email,
-      router,
-      isInitiatingCall,
-      isCreatingChat,
-    ]
-  ); // Add dependencies
+    [videoClient, authState, isInitiatingCall, router]
+  );
 
   // --- Effects ---
-  // Fetch data when the screen comes into focus
   useFocusEffect(
     useCallback(() => {
+      console.log("[HomeScreen] useFocusEffect: Screen focused.");
       if (authState.jwt) {
-        // Ensure user is logged in
         if (isTherapist) {
-          // Fetch therapist's own status
           fetchTherapistSelfStatus();
         } else {
-          // Fetch list of available therapists for clients
           fetchAvailableTherapists();
         }
       }
-      // Optional cleanup function when screen goes out of focus
       return () => {
-        console.log("Home screen blurred");
+        console.log("[HomeScreen] useFocusEffect: Screen blurred.");
+        // Optional: any cleanup when screen blurs
       };
     }, [
       authState.jwt,
       isTherapist,
       fetchAvailableTherapists,
       fetchTherapistSelfStatus,
-    ]) // Dependencies
+    ])
   );
 
-  // --- Refresh Handler ---
-  // Handles pull-to-refresh action
   const onRefresh = useCallback(async () => {
+    console.log("[HomeScreen] onRefresh: Initiated.");
     setRefreshing(true);
     if (isTherapist) {
-      await fetchTherapistSelfStatus(); // Refresh self status
+      await fetchTherapistSelfStatus();
     } else {
-      await fetchAvailableTherapists(); // Refresh list for client
+      await fetchAvailableTherapists();
     }
     setRefreshing(false);
   }, [isTherapist, fetchAvailableTherapists, fetchTherapistSelfStatus]);
 
   // --- Render Logic ---
+  // Therapist View
+  if (isTherapist) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.headerTitle}>Therapist Dashboard</Text>
+        <View style={styles.statusToggleContainer}>
+          <Text style={styles.statusLabel}>My Availability:</Text>
+          <Switch
+            trackColor={{ false: "#767577", true: "#81b0ff" }}
+            thumbColor={therapistStatus ? "#1E90FF" : "#f4f3f4"}
+            ios_backgroundColor="#3e3e3e"
+            onValueChange={toggleAvailability}
+            value={therapistStatus}
+            disabled={isUpdatingStatus}
+          />
+          <Text
+            style={[
+              styles.statusTextBase,
+              therapistStatus ? styles.statusAvailable : styles.statusOffline,
+            ]}
+          >
+            {isUpdatingStatus
+              ? "Updating..."
+              : therapistStatus
+              ? "Available"
+              : "Offline"}
+          </Text>
+        </View>
+        {statusUpdateError && (
+          <Text style={styles.errorTextSmall}>{statusUpdateError}</Text>
+        )}
+        {isUpdatingStatus && (
+          <ActivityIndicator style={{ marginTop: 10 }} color="#007AFF" />
+        )}
+        <Text style={styles.placeholderText}>More features coming soon.</Text>
+        <TouchableOpacity
+          style={[
+            styles.refreshButton,
+            (refreshing || isUpdatingStatus) && styles.disabledButton,
+          ]}
+          onPress={onRefresh}
+          disabled={refreshing || isUpdatingStatus}
+        >
+          <Text style={styles.refreshButtonText}>Refresh Status</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
-  // Loading State (Client View - Initial Load)
-  if (!isTherapist && isLoadingTherapists && therapists.length === 0) {
+  // Client View
+  if (isLoadingTherapists && therapists.length === 0) {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#007BFF" />
@@ -345,332 +348,245 @@ const Page = () => {
     );
   }
 
-  // Error State (Client View)
-  if (!isTherapist && therapistListError) {
+  if (therapistListError) {
     return (
       <View style={styles.centerContainer}>
         <Text style={styles.errorText}>Error: {therapistListError}</Text>
         <TouchableOpacity
+          style={styles.retryButton}
           onPress={fetchAvailableTherapists}
-          style={styles.button}
         >
-          <Text style={styles.buttonTextWhite}>Retry</Text>
+          <Text style={styles.retryButtonText}>Retry</Text>
         </TouchableOpacity>
       </View>
     );
   }
 
-  // Main Content Rendering
   return (
     <View style={styles.container}>
-      {/* === THERAPIST VIEW === */}
-      {isTherapist ? (
-        <View style={styles.therapistDashboard}>
-          <Text style={styles.headerTitle}>My Dashboard</Text>
-
-          {/* Availability Toggle Section */}
-          <View style={styles.statusToggleContainer}>
-            <Text style={styles.statusLabel}>My Status:</Text>
-            <Switch
-              trackColor={{ false: "#767577", true: "#81b0ff" }} // Standard iOS colors
-              thumbColor={therapistStatus ? "#1E90FF" : "#f4f3f4"} // DodgerBlue when on
-              ios_backgroundColor="#3e3e3e" // Dark background for track on iOS
-              onValueChange={toggleAvailability}
-              value={therapistStatus}
-              disabled={isUpdatingStatus}
-            />
-            <Text
-              style={[
-                styles.statusText,
-                therapistStatus ? styles.statusAvailable : styles.statusOffline,
-              ]}
-            >
-              {isUpdatingStatus
-                ? "Updating..."
-                : therapistStatus
-                ? "Available"
-                : "Offline"}
-            </Text>
-          </View>
-          {/* Display error message if status update failed */}
-          {statusUpdateError && (
-            <Text style={styles.errorTextSmall}>{statusUpdateError}</Text>
-          )}
-
-          {/* Placeholder for future features */}
-          <View style={styles.placeholderSection}>
-            <Text style={styles.infoText}>
-              Earnings & Withdrawal features coming soon!
-            </Text>
-          </View>
-        </View>
-      ) : (
-        // === CLIENT VIEW ===
-        <FlatList
-          data={therapists}
-          keyExtractor={(item) => item.id} // Use MongoDB ID as key
-          renderItem={({ item }) => (
-            <View style={styles.therapistItem}>
-              {/* Therapist Information */}
-              <View style={styles.therapistInfo}>
-                <Text style={styles.therapistName}>{item.name}</Text>
-                <Text
-                  style={[
-                    styles.therapistStatus,
-                    item.isAvailable
-                      ? styles.statusAvailable
-                      : styles.statusOffline,
-                  ]}
-                >
-                  {item.isAvailable ? "Available" : "Offline"}
-                </Text>
-              </View>
-              {/* Action Buttons */}
-              <View style={styles.therapistActions}>
-                {/* Chat Button */}
-                <TouchableOpacity
-                  style={[
-                    styles.actionButton,
-                    styles.chatButton,
-                    (!item.isAvailable || isInitiatingCall || isCreatingChat) &&
-                      styles.disabledButton,
-                  ]} // More precise disabling
-                  onPress={() => handleChatPress(item)}
-                  disabled={
-                    !item.isAvailable || !!isCreatingChat || !!isInitiatingCall
-                  }
-                >
-                  {isCreatingChat === item.id ? (
-                    <ActivityIndicator size="small" color="white" />
-                  ) : (
-                    <MaterialIcons
-                      name="chat-bubble-outline"
-                      size={20}
-                      color="white"
-                    />
-                  )}
-                </TouchableOpacity>
-                {/* Call Button */}
-                <TouchableOpacity
-                  style={[
-                    styles.actionButton,
-                    styles.callButton,
-                    (!item.isAvailable || isInitiatingCall || isCreatingChat) &&
-                      styles.disabledButton,
-                  ]} // More precise disabling
-                  onPress={() => handleCallPress(item)}
-                  disabled={
-                    !item.isAvailable || !!isInitiatingCall || !!isCreatingChat
-                  }
-                >
-                  {isInitiatingCall === item.id ? (
-                    <ActivityIndicator size="small" color="white" />
-                  ) : (
-                    <MaterialIcons name="call" size={20} color="white" />
-                  )}
-                </TouchableOpacity>
-              </View>
+      <FlatList
+        data={therapists}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <View style={styles.therapistItem}>
+            <View style={styles.therapistInfo}>
+              <Text style={styles.therapistName}>
+                {item.name || "Therapist"}
+              </Text>
+              <Text
+                style={[
+                  styles.statusTextBase,
+                  item.isAvailable
+                    ? styles.statusAvailableCard
+                    : styles.statusOfflineCard,
+                ]}
+              >
+                {item.isAvailable ? "Available" : "Offline"}
+              </Text>
             </View>
-          )}
-          // List Header
-          ListHeaderComponent={() => (
-            <Text style={styles.listHeader}>Available Therapists</Text>
-          )}
-          // Empty List Component
-          ListEmptyComponent={() =>
-            !isLoadingTherapists && ( // Render only when not loading initially
-              <View style={styles.centerContainer}>
-                <Text style={styles.infoText}>
-                  No therapists are available right now.
-                </Text>
-              </View>
-            )
-          }
-          // Pull-to-refresh Control
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor="#007BFF"
-            />
-          }
-          contentContainerStyle={styles.listContentContainer}
-        />
-      )}
+            <View style={styles.therapistActions}>
+              <TouchableOpacity
+                style={[
+                  styles.actionButtonBase,
+                  styles.videoCallButton,
+                  (!item.isAvailable || !!isInitiatingCall) &&
+                    styles.disabledButton,
+                ]}
+                onPress={() => initiateCall(item, "video")}
+                disabled={!item.isAvailable || !!isInitiatingCall}
+              >
+                {isInitiatingCall === item.id + "video" ? (
+                  <ActivityIndicator size="small" color="white" />
+                ) : (
+                  <MaterialIcons name="videocam" size={20} color="white" />
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.actionButtonBase,
+                  styles.audioCallButton,
+                  (!item.isAvailable || !!isInitiatingCall) &&
+                    styles.disabledButton,
+                ]}
+                onPress={() => initiateCall(item, "audio")}
+                disabled={!item.isAvailable || !!isInitiatingCall}
+              >
+                {isInitiatingCall === item.id + "audio" ? (
+                  <ActivityIndicator size="small" color="white" />
+                ) : (
+                  <MaterialIcons name="call" size={20} color="white" />
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+        ListHeaderComponent={() => (
+          <Text style={styles.listHeader}>Available Therapists</Text>
+        )}
+        ListEmptyComponent={() =>
+          !isLoadingTherapists && (
+            <View style={styles.centerContainerEmptyList}>
+              <Text style={styles.infoText}>
+                No therapists available right now.
+              </Text>
+              <Text style={styles.infoTextSmall}>Pull down to refresh.</Text>
+            </View>
+          )
+        }
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#007BFF" // iOS
+            colors={["#007AFF"]} // Android
+          />
+        }
+        contentContainerStyle={styles.listContentContainer}
+      />
     </View>
   );
 };
 
-// --- STYLES --- (Consolidated and slightly refined)
+// Styles
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#F8F9FA",
-  },
+  container: { flex: 1, backgroundColor: "#F0F2F5" },
   centerContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
     padding: 20,
-    marginTop: 50, // Add some margin if it's rendered inside the list
   },
-  // Therapist Dashboard Styles
-  therapistDashboard: {
+  centerContainerEmptyList: {
+    paddingTop: 50,
+    alignItems: "center",
     padding: 20,
   },
   headerTitle: {
     fontSize: 24,
     fontWeight: "bold",
-    marginBottom: 25,
-    color: "#343A40",
+    marginVertical: 20,
+    textAlign: "center",
+    color: "#333",
   },
   statusToggleContainer: {
     flexDirection: "row",
     alignItems: "center",
+    padding: 15,
     backgroundColor: "white",
-    paddingVertical: 12,
-    paddingHorizontal: 15,
-    borderRadius: 8,
+    borderRadius: 12,
+    marginHorizontal: 15,
     marginBottom: 10,
+    elevation: 3,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.1,
     shadowRadius: 2,
-    elevation: 2,
   },
   statusLabel: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "500",
-    color: "#495057",
-    marginRight: 15, // Increased spacing
+    marginRight: 10,
+    color: "#4A4A4A",
   },
-  statusText: {
-    fontSize: 15,
-    fontWeight: "600", // Semibold
-    marginLeft: "auto",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 5,
-    overflow: "hidden",
-  },
-  statusAvailable: {
-    color: "#28A745", // Green text for Available status
-    // backgroundColor: '#e7f7e9', // Optional light green background
-  },
-  statusOffline: {
-    color: "#6C757D", // Grey text for Offline status
-    // backgroundColor: '#f1f3f5', // Optional light grey background
-  },
+  statusTextBase: { fontSize: 14, fontWeight: "600" },
+  statusAvailable: { color: "#28A745", marginLeft: "auto" },
+  statusOffline: { color: "#6C757D", marginLeft: "auto" },
+  statusAvailableCard: { color: "#28A745", fontSize: 13 },
+  statusOfflineCard: { color: "#AEAEAE", fontSize: 13 },
   errorTextSmall: {
     fontSize: 13,
-    color: "#DC3545",
-    marginTop: -5,
+    color: "#D9534F",
+    marginHorizontal: 15,
+    marginTop: 5,
+    marginBottom: 10,
+    textAlign: "center",
+  },
+  infoText: { fontSize: 17, color: "#6C757D", textAlign: "center" },
+  infoTextSmall: {
+    fontSize: 14,
+    color: "#888",
+    textAlign: "center",
+    marginTop: 5,
+  },
+  errorText: {
+    fontSize: 16,
+    color: "#D9534F",
+    textAlign: "center",
     marginBottom: 15,
-    marginLeft: 15,
   },
-  placeholderSection: {
+  placeholderText: {
+    textAlign: "center",
     marginTop: 30,
-    padding: 20,
-    backgroundColor: "#E9ECEF",
-    borderRadius: 8,
-    alignItems: "center",
+    color: "gray",
+    fontSize: 15,
   },
-  // Client View List Styles
+  retryButton: {
+    backgroundColor: "#007AFF",
+    paddingVertical: 12,
+    paddingHorizontal: 30,
+    borderRadius: 8,
+    elevation: 2,
+  },
+  retryButtonText: { color: "white", fontSize: 16, fontWeight: "bold" },
+  refreshButton: {
+    backgroundColor: "#5BC0DE",
+    paddingVertical: 12,
+    paddingHorizontal: 25,
+    borderRadius: 8,
+    alignSelf: "center",
+    marginTop: 20,
+    elevation: 2,
+  },
+  refreshButtonText: { color: "white", fontSize: 16, fontWeight: "bold" },
   listHeader: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: "bold",
-    marginTop: 20, // Added top margin
+    marginTop: 15,
     marginBottom: 10,
     marginLeft: 15,
     color: "#343A40",
   },
-  listContentContainer: {
-    paddingBottom: 20,
-  },
+  listContentContainer: { paddingBottom: 20 },
   therapistItem: {
     backgroundColor: "white",
-    paddingVertical: 15,
-    paddingHorizontal: 20,
-    marginVertical: 6, // Slightly increased vertical margin
-    marginHorizontal: 12, // Slightly increased horizontal margin
-    borderRadius: 10, // Slightly more rounded
+    padding: 15,
+    marginVertical: 6,
+    marginHorizontal: 12,
+    borderRadius: 10,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    elevation: 2,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 3, // Slightly increased shadow
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
   },
-  therapistInfo: {
-    flex: 1,
-    marginRight: 10, // Add margin to prevent text touching buttons
-  },
+  therapistInfo: { flex: 1, marginRight: 10 },
   therapistName: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "600",
     color: "#212529",
-    marginBottom: 3, // Space between name and status
+    marginBottom: 4,
   },
-  therapistStatus: {
-    fontSize: 13,
-    // Colors handled inline using statusAvailable/statusOffline styles
-  },
-  therapistActions: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  actionButton: {
-    marginLeft: 12, // Increased spacing between buttons
-    borderRadius: 20, // Circular
+  therapistActions: { flexDirection: "row", alignItems: "center" },
+  actionButtonBase: {
+    marginLeft: 10,
+    borderRadius: 22,
+    width: 44,
+    height: 44,
     justifyContent: "center",
     alignItems: "center",
-    width: 40,
-    height: 40,
+    elevation: 2,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.15,
     shadowRadius: 1.5,
-    elevation: 2,
   },
-  chatButton: {
-    backgroundColor: "#17A2B8", // Teal/Info
-  },
-  callButton: {
-    backgroundColor: "#28A745", // Green
-  },
-  disabledButton: {
-    backgroundColor: "#ADB5BD", // Greyed out
-    elevation: 0, // Remove shadow when disabled
-    opacity: 0.7, // Make it slightly transparent
-  },
-  // General Info/Error Styles
-  infoText: {
-    fontSize: 16,
-    color: "#6C757D",
-    textAlign: "center",
-  },
-  errorText: {
-    fontSize: 16,
-    color: "#DC3545",
-    textAlign: "center",
-    marginBottom: 15,
-  },
-  button: {
-    // General retry button style
-    backgroundColor: "#007BFF",
-    paddingVertical: 10,
-    paddingHorizontal: 25, // Wider padding
-    borderRadius: 5,
-    marginTop: 15, // Increased margin
-  },
-  buttonTextWhite: {
-    // Text for buttons with dark backgrounds
-    color: "white",
-    fontWeight: "bold", // Bolder text
-    textAlign: "center",
-  },
+  // chatButton: { backgroundColor: "#5BC0DE" }, // Style for the removed chat button
+  videoCallButton: { backgroundColor: "#5CB85C" },
+  audioCallButton: { backgroundColor: "#0275D8" },
+  disabledButton: { backgroundColor: "#BDBDBD", opacity: 0.6, elevation: 0 },
 });
 
-export default Page;
+export default HomeScreen;

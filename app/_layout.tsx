@@ -1,6 +1,5 @@
 // app/_layout.tsx
-
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Slot } from "expo-router";
 import "react-native-reanimated";
 import {
@@ -13,116 +12,175 @@ import {
   View,
   useColorScheme,
   StyleSheet,
+  SafeAreaView,
+  Text,
 } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import "@/global.css";
 
-// Import Providers
-import { AuthProvider, useAuth } from "@/providers/AuthProvider"; // useAuth needed in InnerLayout
-import { AppointmentProvider } from "@/providers/AppointmentProvider";
-import VideoProvider from "@/providers/VideoProvider";
-import { OverlayProvider as StreamChatOverlayProvider } from "stream-chat-expo";
+// Import Providers & SDK Components
+import { AuthProvider, useAuth } from "@/providers/AuthProvider";
 
-// Import the Ringing Call Overlay Component
-import { RingingCallsOverlay } from "@/components/RingingCallsOverlay";
+import {
+  StreamVideo,
+  StreamVideoClient,
+  User as StreamSDKUser,
+  StreamCall,
+  useCalls,
+  RingingCallContent,
+} from "@stream-io/video-react-native-sdk";
+// REMOVED: import { OverlayProvider as StreamChatOverlayProvider } from "stream-chat-expo"; // <-- REMOVE
 
-/**
- * InitialLayout: Checks initialization state. Renders Slot for main content.
- * This component still needs to be INSIDE AuthProvider because it calls useAuth.
- */
-const InitialLayout = () => {
-  const { authState, initialized } = useAuth(); // This call is now valid because InitialLayout is rendered inside AuthProvider
+const apiKey = process.env.EXPO_PUBLIC_STREAM_ACCESS_KEY as string;
+
+// --- Global Ringing UI Component (Remains the same) ---
+const RingingCalls = () => {
+  const calls = useCalls().filter((c) => c.ringing);
+  const ringingCall = calls[0];
+
+  if (!ringingCall) {
+    return null;
+  }
+
   console.log(
-    "InitialLayout Render - Initialized:",
-    initialized,
-    "Authenticated:",
-    authState?.authenticated
+    `[RingingCalls] Rendering for call ID: ${ringingCall.id}, State: ${ringingCall.state.callingState}, isCreatedByMe: ${ringingCall.isCreatedByMe}`
+  );
+  return (
+    <StreamCall call={ringingCall}>
+      <SafeAreaView style={StyleSheet.absoluteFill}>
+        <View style={styles.ringingContainer}>
+          <Text style={styles.ringingText}>Incoming Call</Text>
+          <RingingCallContent />
+        </View>
+      </SafeAreaView>
+    </StreamCall>
+  );
+};
+// --- End Global Ringing UI Component ---
+
+const InnerApp = () => {
+  const { authState, initialized } = useAuth();
+  const colorScheme = useColorScheme();
+  const [videoClient, setVideoClient] = useState<StreamVideoClient | null>(
+    null
   );
 
+  // useEffect for video client initialization (Remains the same)
+  useEffect(() => {
+    let client: StreamVideoClient;
+    let unmounted = false;
+
+    if (
+      authState.authenticated &&
+      authState.streamId &&
+      authState.streamToken &&
+      apiKey
+    ) {
+      console.log(
+        "[InnerApp EFFECT] Auth ready, creating/getting video client for:",
+        authState.streamId
+      );
+      const user: StreamSDKUser = {
+        id: authState.streamId,
+        name: authState.email || authState.streamId,
+      };
+      client = StreamVideoClient.getOrCreateInstance({
+        apiKey,
+        user,
+        token: authState.streamToken,
+      });
+      if (!unmounted) {
+        setVideoClient(client);
+      }
+    } else if (videoClient) {
+      console.log("[InnerApp EFFECT] Logging out, disconnecting video client.");
+      videoClient
+        .disconnectUser()
+        .catch((e) => console.error("Error disconnecting user:", e));
+      if (!unmounted) {
+        setVideoClient(null);
+      }
+    }
+
+    return () => {
+      unmounted = true;
+    };
+  }, [authState.authenticated, authState.streamId, authState.streamToken]);
+
+  // Loading states (Remain the same)
   if (!initialized) {
-    console.log("InitialLayout: Showing Loader (Not Initialized)");
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color="#007AFF" />
+        <Text style={styles.text}>Loading...</Text>
       </View>
     );
   }
-  console.log("InitialLayout: Rendering Slot");
-  return <Slot />;
-};
+  if (authState.authenticated && (!videoClient || !apiKey)) {
+    if (!apiKey) console.error("Stream API Key is missing!");
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#007AFF" />
+        <Text style={styles.text}>
+          {!apiKey ? "Missing API Key" : "Initializing services..."}
+        </Text>
+      </View>
+    );
+  }
 
-/**
- * InnerLayout: This component is rendered INSIDE AuthProvider.
- * It can safely call useAuth() and conditionally render components
- * based on the authentication state.
- */
-const InnerLayout = () => {
-  const { authState, initialized } = useAuth(); // Call useAuth here
-  const colorScheme = useColorScheme(); // Can get colorScheme here if needed, or pass down
-
-  console.log(
-    "InnerLayout Render - Initialized:",
-    initialized,
-    "Authenticated:",
-    authState.authenticated
-  );
-
+  // --- Render Logic (ChatProvider Removed) ---
   return (
     <>
-      {/* Set status bar style */}
       <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
-
-      {/* InitialLayout handles the !initialized state and renders the main navigation slot */}
-      <InitialLayout />
-
-      {/* --- Conditionally Render RingingCallsOverlay --- */}
-      {/* Render only when Auth is initialized AND user is authenticated */}
-      {initialized && authState.authenticated && <RingingCallsOverlay />}
+      {videoClient ? (
+        <StreamVideo client={videoClient}>
+          <Slot /> {/* Main app content */}
+          <RingingCalls /> {/* Global ringing UI on top */}
+        </StreamVideo>
+      ) : (
+        <Slot />
+      )}
     </>
   );
 };
 
-/**
- * RootLayout: Sets up ALL providers. Renders InnerLayout inside the providers.
- * It does NOT call useAuth() itself.
- */
 const RootLayout = () => {
-  const colorScheme = useColorScheme(); // Get colorScheme here for ThemeProvider
+  const colorScheme = useColorScheme();
   console.log(`RootLayout Render - Setting up providers`);
 
   return (
     <GestureHandlerRootView style={styles.rootView}>
-      <StreamChatOverlayProvider>
-        <ThemeProvider
-          value={colorScheme === "dark" ? DarkTheme : DefaultTheme}
-        >
-          {/* AuthProvider Wraps everything that needs auth context */}
-          <AuthProvider>
-            <AppointmentProvider>
-              {/* VideoProvider wraps InnerLayout because RingingCallsOverlay needs its context */}
-              <VideoProvider>
-                {/* Render the InnerLayout which CAN use the contexts */}
-                <InnerLayout />
-              </VideoProvider>
-            </AppointmentProvider>
-          </AuthProvider>
-        </ThemeProvider>
-      </StreamChatOverlayProvider>
+      <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
+        <AuthProvider>
+          <InnerApp />
+        </AuthProvider>
+      </ThemeProvider>
     </GestureHandlerRootView>
   );
 };
 
-// Styles
 const styles = StyleSheet.create({
-  rootView: {
-    flex: 1,
-  },
+  rootView: { flex: 1 },
   loadingContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#FFFFFF", // Or use theme
+    backgroundColor: "#FFFFFF",
+  },
+  text: {
+    marginTop: 10,
+    fontSize: 16,
+  },
+  ringingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  ringingText: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 10,
   },
 });
 

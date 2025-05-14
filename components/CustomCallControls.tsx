@@ -1,41 +1,63 @@
-/**
- * CustomCallControls.tsx
- *
- * This component provides a customized UI for video call controls.
- * It renders a styled control bar with buttons for toggling microphone,
- * switching camera, showing reactions (for non-therapists), and ending the call.
- */
-import { useAuth } from '@/providers/AuthProvider';
+// components/CustomCallControls.tsx
+import React from "react";
+import { View } from "react-native";
 import {
-  CallControlProps,
-  ToggleAudioPublishingButton as ToggleMic,
+  CallControlProps, // This is the type for props passed by CallContent
+  ToggleAudioPublishingButton,
   ToggleCameraFaceButton,
   ReactionsButton,
   HangUpCallButton,
-} from '@stream-io/video-react-native-sdk';
+  ToggleVideoPublishingButton, // Added for completeness if needed for video calls
+} from "@stream-io/video-react-native-sdk";
+import { useAuth } from "@/providers/AuthProvider";
 
-import { View } from 'react-native';
+// Add callMode to the props type
+interface CustomCallControlsProps extends CallControlProps {
+  callMode: "audio" | "video";
+}
 
-/**
- * CustomCallControls component that renders a styled control bar for video calls
- *
- * @param props - CallControlProps from Stream Video SDK, includes handlers like onHangupCallHandler
- * @returns A styled control bar with video call control buttons
- */
-export const CustomCallControls = (props: CallControlProps) => {
-  // Get user role information to conditionally render controls
+export const CustomCallControls = (props: CustomCallControlsProps) => {
   const { isTherapist } = useAuth();
+  const { callMode, onHangupCallHandler } = props;
+
+  console.log(`[CustomCallControls] Rendering for mode: ${callMode}`);
 
   return (
-    <View className="absolute bottom-10 py-4 w-4/5 mx-5 flex-row self-center justify-around rounded-[10px] border-5 border-blue-500 bg-blue-800 z-5">
-      {/* Toggle microphone on/off */}
-      <ToggleMic />
-      {/* Switch between front and back camera */}
-      <ToggleCameraFaceButton />
-      {/* Only show reactions button for non-therapist users */}
-      {!isTherapist && <ReactionsButton />}
-      {/* Button to end the call */}
-      <HangUpCallButton onHangupCallHandler={props.onHangupCallHandler} />
+    <View
+      // Using basic inline styles for demonstration, replace with your NativeWind classes
+      style={{
+        position: "absolute",
+        bottom: 40, // Increased bottom spacing
+        left: "10%", // Centering trick
+        right: "10%", // Centering trick
+        width: "80%",
+        flexDirection: "row",
+        justifyContent: "space-around",
+        alignItems: "center",
+        paddingVertical: 12,
+        paddingHorizontal: 10,
+        backgroundColor: "rgba(0, 0, 50, 0.7)", // Darker, semi-transparent
+        borderRadius: 25, // More rounded
+        elevation: 5,
+        zIndex: 100, // Ensure it's on top
+      }}
+    >
+      <ToggleAudioPublishingButton />
+
+      {callMode === "video" && (
+        // Only show video controls if it's a video call
+        <>
+          <ToggleVideoPublishingButton />
+          <ToggleCameraFaceButton />
+        </>
+      )}
+
+      {!isTherapist &&
+        callMode === "video" && ( // Reactions might also make sense only for video
+          <ReactionsButton />
+        )}
+
+      <HangUpCallButton onHangupCallHandler={onHangupCallHandler} />
     </View>
   );
 };
