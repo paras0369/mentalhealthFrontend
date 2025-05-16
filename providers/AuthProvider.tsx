@@ -1,26 +1,35 @@
 // providers/AuthProvider.tsx
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+} from "react";
 import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
 
 // Key used for storing the auth data
-const AUTH_DATA_KEY = "auth-data"; // Renamed for clarity
+const AUTH_DATA_KEY = "auth-data";
 
 export const API_URL = Platform.select({
   ios: process.env.EXPO_PUBLIC_API_URL,
-  android: "http://192.168.29.45:3000", // Make sure this is correct for your setup
-  default: process.env.EXPO_PUBLIC_API_URL, // For web or other platforms
+  android: process.env.EXPO_PUBLIC_API_URL || "http://10.0.2.2:3000", // 10.0.2.2 for Android emulator to host machine
+  default: process.env.EXPO_PUBLIC_API_URL,
 });
 
 // --- Define a clear interface for the Auth State ---
 interface AuthState {
-  jwt: string | null; // JWT for your backend API
-  streamToken: string | null; // Token for Stream Chat/Video
-  authenticated: boolean; // Is the user logged in?
-  userId: string | null; // MongoDB User._id
-  streamId: string | null; // User ID used in Stream
-  role: string | null; // User role ('client' or 'therapist')
-  email: string | null; // User email
+  jwt: string | null;
+  streamToken: string | null;
+  authenticated: boolean;
+  userId: string | null;
+  streamId: string | null;
+  role: string | null;
+  email: string | null;
+  creditBalance: number | null;
+  earningBalance: number | null;
+  isTherapist: boolean | null;
 }
 
 // --- Define the context type ---
@@ -28,7 +37,11 @@ interface AuthContextProps {
   authState: AuthState;
   onRegister: (email: string, password: string) => Promise<any>;
   signIn: (email: string, password: string) => Promise<any>;
-  signOut: () => Promise<any>;
+  signOut: () => Promise<void>;
+  updateBalances: (balances: {
+    creditBalance?: number;
+    earningBalance?: number;
+  }) => Promise<void>;
   initialized: boolean;
   isTherapist: boolean;
 }
@@ -37,18 +50,20 @@ interface AuthContextProps {
 const EMPTY_AUTH_STATE: AuthState = {
   jwt: null,
   streamToken: null,
-  authenticated: false, // Default to false
+  authenticated: false,
   userId: null,
   streamId: null,
   role: null,
   email: null,
+  creditBalance: null,
+  earningBalance: null,
+  isTherapist: null,
 };
 
 // --- Create Context ---
-// Use Partial<AuthContextProps> only here, assert type in useAuth hook
 const AuthContext = createContext<Partial<AuthContextProps>>({});
 
-// --- Storage Helper (remains the same) ---
+// --- Storage Helper ---
 const storage = {
   async setItem(key: string, value: string) {
     if (Platform.OS === "web") {
@@ -81,166 +96,222 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [authState, setAuthState] = useState<AuthState>(EMPTY_AUTH_STATE);
   const [initialized, setInitialized] = useState(false);
 
+  // Effect to load auth data on initialization
   useEffect(() => {
     const loadAuthData = async () => {
-      console.log("Attempting to load auth data...");
+      console.log("[AuthProvider] Attempting to load auth data...");
       const dataString = await storage.getItem(AUTH_DATA_KEY);
-      console.log("Retrieved data string:", dataString);
+      console.log("[AuthProvider] Retrieved data string:", dataString);
 
       if (dataString) {
         try {
           const storedAuthState: AuthState = JSON.parse(dataString);
-          // Basic validation: check if essential fields exist
           if (
             storedAuthState.jwt &&
             storedAuthState.streamToken &&
             storedAuthState.userId &&
             storedAuthState.streamId
           ) {
-            console.log("Stored auth data seems valid, setting state.");
-            setAuthState({ ...storedAuthState, authenticated: true }); // Ensure authenticated is true if data exists
+            console.log(
+              "[AuthProvider] Stored auth data seems valid, setting state."
+            );
+            setAuthState({ ...storedAuthState, authenticated: true });
           } else {
-            console.log("Stored auth data is invalid or incomplete.");
-            // Optionally clear invalid data
+            console.log(
+              "[AuthProvider] Stored auth data is invalid or incomplete. Clearing."
+            );
             await storage.removeItem(AUTH_DATA_KEY);
           }
         } catch (e) {
-          console.error("Failed to parse stored auth data:", e);
-          await storage.removeItem(AUTH_DATA_KEY); // Clear corrupted data
+          console.error("[AuthProvider] Failed to parse stored auth data:", e);
+          await storage.removeItem(AUTH_DATA_KEY);
         }
       } else {
-        console.log("No auth data found in storage.");
+        console.log("[AuthProvider] No auth data found in storage.");
       }
       setInitialized(true);
     };
     loadAuthData();
   }, []);
 
-  // --- Helper to update state and store data ---
-  const setAndStoreAuthState = async (newAuthState: AuthState) => {
-    setAuthState(newAuthState);
-    // Only store if authenticated, otherwise remove data
-    if (newAuthState.authenticated && newAuthState.jwt) {
-      console.log("Storing auth data:", newAuthState);
-      await storage.setItem(AUTH_DATA_KEY, JSON.stringify(newAuthState));
+  // Helper to persist auth state when it changes
+  const persistAuthState = useCallback(async (stateToPersist: AuthState) => {
+    if (stateToPersist.authenticated && stateToPersist.jwt) {
+      console.log("[AuthProvider] Storing auth data:", stateToPersist);
+      await storage.setItem(AUTH_DATA_KEY, JSON.stringify(stateToPersist));
     } else {
-      console.log("Removing auth data from storage.");
+      console.log("[AuthProvider] Removing auth data from storage.");
       await storage.removeItem(AUTH_DATA_KEY);
     }
-  };
+  }, []);
 
   // --- Authentication Functions ---
-  const signIn = async (email: string, password: string) => {
-    console.log(`Attempting sign in for: ${email}`);
-    try {
-      const result = await fetch(`${API_URL}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
+  const signIn = useCallback(
+    async (email: string, password: string) => {
+      console.log(`[AuthProvider] Attempting sign in for: ${email}`);
+      try {
+        const result = await fetch(`${API_URL}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
 
-      const json = await result.json();
-      console.log("Login API Response:", json);
+        const json = await result.json();
+        console.log("[AuthProvider] Login API Response:", json);
 
-      if (!result.ok) {
-        console.error("Login failed:", json.message || "Unknown error");
-        throw new Error(json.message || "Login failed");
+        if (!result.ok) {
+          throw new Error(json.message || "Login failed");
+        }
+
+        if (
+          json.jwt &&
+          json.token &&
+          json.user &&
+          json.user.id &&
+          json.user.streamId
+        ) {
+          const newAuthState: AuthState = {
+            jwt: json.jwt,
+            streamToken: json.token,
+            authenticated: true,
+            userId: json.user.id,
+            streamId: json.user.streamId,
+            role: json.user.role,
+            email: json.user.email,
+            creditBalance: json.user.creditBalance ?? null, // Ensure null if undefined
+            earningBalance: json.user.earningBalance ?? null,
+            isTherapist: json.user.isTherapist ?? null,
+          };
+          setAuthState(newAuthState); // Set the new state
+          await persistAuthState(newAuthState); // Persist it
+          console.log("[AuthProvider] Sign in successful, auth state updated.");
+          return json;
+        } else {
+          throw new Error("Login response format incorrect.");
+        }
+      } catch (e: any) {
+        console.error("[AuthProvider] Error during sign in:", e);
+        setAuthState(EMPTY_AUTH_STATE); // Reset state on error
+        await persistAuthState(EMPTY_AUTH_STATE);
+        throw e;
+      }
+    },
+    [persistAuthState]
+  );
+
+  const onRegister = useCallback(
+    async (email: string, password: string) => {
+      console.log(`[AuthProvider] Attempting registration for: ${email}`);
+      try {
+        const result = await fetch(`${API_URL}/auth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+
+        const json = await result.json();
+        console.log("[AuthProvider] Register API Response:", json);
+
+        if (!result.ok) {
+          throw new Error(json.message || "Registration failed");
+        }
+
+        if (
+          json.jwt &&
+          json.token &&
+          json.user &&
+          json.user.id &&
+          json.user.streamId
+        ) {
+          const newAuthState: AuthState = {
+            jwt: json.jwt,
+            streamToken: json.token,
+            authenticated: true,
+            userId: json.user.id,
+            streamId: json.user.streamId,
+            role: json.user.role,
+            email: json.user.email,
+            creditBalance: json.user.creditBalance ?? null,
+            earningBalance: json.user.earningBalance ?? null,
+            isTherapist: json.user.isTherapist ?? null,
+          };
+          setAuthState(newAuthState);
+          await persistAuthState(newAuthState);
+          console.log(
+            "[AuthProvider] Registration successful, auth state updated."
+          );
+          return json;
+        } else {
+          throw new Error("Registration response format incorrect.");
+        }
+      } catch (e: any) {
+        console.error("[AuthProvider] Error during registration:", e);
+        setAuthState(EMPTY_AUTH_STATE);
+        await persistAuthState(EMPTY_AUTH_STATE);
+        throw e;
+      }
+    },
+    [persistAuthState]
+  );
+
+  const signOut = useCallback(async () => {
+    console.log("[AuthProvider] Signing out.");
+    setAuthState(EMPTY_AUTH_STATE);
+    await persistAuthState(EMPTY_AUTH_STATE);
+  }, [persistAuthState]);
+
+  const updateBalances = useCallback(
+    async (balances: { creditBalance?: number; earningBalance?: number }) => {
+      if (!authState.authenticated) {
+        console.warn(
+          "[AuthProvider] updateBalances called while not authenticated."
+        );
+        return;
       }
 
-      // --- Correctly parse the NEW response structure ---
+      let needsStateUpdate = false;
+      const updatedPartialState: Partial<AuthState> = {};
+
       if (
-        json.jwt &&
-        json.token &&
-        json.user &&
-        json.user.id &&
-        json.user.streamId
+        typeof balances.creditBalance === "number" &&
+        authState.creditBalance !== balances.creditBalance
       ) {
-        const newAuthState: AuthState = {
-          jwt: json.jwt,
-          streamToken: json.token, // Renamed from 'token' to avoid clash
-          authenticated: true,
-          userId: json.user.id, // MongoDB _id
-          streamId: json.user.streamId, // Stream's User ID
-          role: json.user.role,
-          email: json.user.email,
-        };
-        await setAndStoreAuthState(newAuthState);
-        console.log("Sign in successful, auth state updated.");
-        return json; // Return the original JSON if needed elsewhere
-      } else {
-        console.error("Login response missing required fields.");
-        throw new Error("Login response format incorrect.");
+        updatedPartialState.creditBalance = balances.creditBalance;
+        needsStateUpdate = true;
       }
-    } catch (e: any) {
-      console.error("Error during sign in:", e);
-      // Ensure state is cleared on error
-      await setAndStoreAuthState(EMPTY_AUTH_STATE);
-      throw e; // Re-throw error so UI can catch it
-    }
-  };
-
-  const register = async (email: string, password: string) => {
-    console.log(`Attempting registration for: ${email}`);
-    try {
-      const result = await fetch(`${API_URL}/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-
-      const json = await result.json();
-      console.log("Register API Response:", json);
-
-      if (!result.ok) {
-        console.error("Registration failed:", json.message || "Unknown error");
-        throw new Error(json.message || "Registration failed");
-      }
-
-      // --- Correctly parse the NEW response structure ---
       if (
-        json.jwt &&
-        json.token &&
-        json.user &&
-        json.user.id &&
-        json.user.streamId
+        typeof balances.earningBalance === "number" &&
+        authState.earningBalance !== balances.earningBalance
       ) {
-        const newAuthState: AuthState = {
-          jwt: json.jwt,
-          streamToken: json.token,
-          authenticated: true,
-          userId: json.user.id,
-          streamId: json.user.streamId,
-          role: json.user.role,
-          email: json.user.email,
-        };
-        await setAndStoreAuthState(newAuthState);
-        console.log("Registration successful, auth state updated.");
-        return json;
-      } else {
-        console.error("Registration response missing required fields.");
-        throw new Error("Registration response format incorrect.");
+        updatedPartialState.earningBalance = balances.earningBalance;
+        needsStateUpdate = true;
       }
-    } catch (e: any) {
-      console.error("Error during registration:", e);
-      // Ensure state is cleared on error
-      await setAndStoreAuthState(EMPTY_AUTH_STATE);
-      throw e; // Re-throw error so UI can catch it
-    }
-  };
 
-  const signOut = async () => {
-    console.log("Signing out.");
-    // Optional: Call backend logout endpoint if it exists (e.g., to invalidate JWT server-side)
-    await setAndStoreAuthState(EMPTY_AUTH_STATE); // Clear state and storage
-  };
+      if (needsStateUpdate) {
+        console.log(
+          "[AuthProvider] Balances differ, updating authState with:",
+          updatedPartialState
+        );
+        const newState = { ...authState, ...updatedPartialState };
+        setAuthState(newState);
+        await persistAuthState(newState);
+      } else {
+        console.log(
+          "[AuthProvider] Fetched balances are same as current. No state update."
+        );
+      }
+    },
+    [authState, persistAuthState]
+  );
 
   const isTherapist = authState.role === "therapist";
 
   const value: AuthContextProps = {
     authState,
-    onRegister: register,
+    onRegister,
     signIn,
     signOut,
+    updateBalances,
     initialized,
     isTherapist,
   };
@@ -250,7 +321,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
 // Custom hook to use the AuthContext
 export const useAuth = (): AuthContextProps => {
-  // Assert context type here for better intellisense and type safety
   const context = useContext(AuthContext);
   if (context === undefined || Object.keys(context).length === 0) {
     throw new Error("useAuth must be used within an AuthProvider");
