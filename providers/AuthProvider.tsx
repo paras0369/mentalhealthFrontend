@@ -23,6 +23,7 @@ interface AuthState {
   jwt: string | null;
   streamToken: string | null;
   authenticated: boolean;
+  name: string | null;
   userId: string | null;
   streamId: string | null;
   role: string | null;
@@ -35,7 +36,7 @@ interface AuthState {
 // --- Define the context type ---
 interface AuthContextProps {
   authState: AuthState;
-  onRegister: (email: string, password: string) => Promise<any>;
+  onRegister: (name: string, email: string, password: string) => Promise<any>;
   signIn: (email: string, password: string) => Promise<any>;
   signOut: () => Promise<void>;
   updateBalances: (balances: {
@@ -58,6 +59,7 @@ const EMPTY_AUTH_STATE: AuthState = {
   creditBalance: null,
   earningBalance: null,
   isTherapist: null,
+  name: null,
 };
 
 // --- Create Context ---
@@ -181,6 +183,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             creditBalance: json.user.creditBalance ?? null, // Ensure null if undefined
             earningBalance: json.user.earningBalance ?? null,
             isTherapist: json.user.isTherapist ?? null,
+            name: json.user.name ?? null, // Added name to the state
           };
           setAuthState(newAuthState); // Set the new state
           await persistAuthState(newAuthState); // Persist it
@@ -200,13 +203,15 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   );
 
   const onRegister = useCallback(
-    async (email: string, password: string) => {
-      console.log(`[AuthProvider] Attempting registration for: ${email}`);
+    async (name: string, email: string, password: string) => {
+      console.log(
+        `[AuthProvider] Attempting registration for: ${email} , Name: ${name}`
+      );
       try {
         const result = await fetch(`${API_URL}/auth/register`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email, password, name }),
         });
 
         const json = await result.json();
@@ -234,6 +239,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             creditBalance: json.user.creditBalance ?? null,
             earningBalance: json.user.earningBalance ?? null,
             isTherapist: json.user.isTherapist ?? null,
+            name: json.user.name ?? null, // Added name to the state
           };
           setAuthState(newAuthState);
           await persistAuthState(newAuthState);

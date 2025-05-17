@@ -36,6 +36,16 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen // New History Screen Tab
+        name="history" // This will correspond to history.tsx
+        options={{
+          tabBarLabel: "History",
+          title: "Call History",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="time-outline" size={size} color={color} />
+          ),
+        }}
+      />
 
       <Tabs.Screen
         name="profile"
