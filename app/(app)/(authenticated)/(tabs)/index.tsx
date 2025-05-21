@@ -154,53 +154,80 @@ const HomeScreen = () => {
         `[HomeScreen] initiateCall to ${therapist.name}, Mode: ${callMode}`
       );
       if (!videoClient || !authState.streamId || !authState.email) {
-        Alert.alert(
-          "Error",
-          "Video service or user details are missing. Please try again."
-        );
+        Alert.alert("Error", "Video service or user details are missing.");
         return;
       }
       if (isInitiatingCall) return;
 
-      const requiredCoins = therapist.therapistRatePerMinute || 5; // Assuming 1 min minimum
+      const requiredCoins = therapist.therapistRatePerMinute || 5;
       if (!isTherapist && (authState.creditBalance ?? 0) < requiredCoins) {
         Alert.alert(
           "Low Balance",
-          `You need at least ${requiredCoins} coins for this call. Please buy more coins.`
+          `You need at least ${requiredCoins} coins. Please buy more.`
         );
         return;
       }
 
       setIsInitiatingCall(therapist.id + callMode);
-      const callId = Crypto.randomUUID();
+      const callId = Crypto.randomUUID(); // This will be the call_id part of the CID
       const streamCallType = "default";
 
       try {
         const call = videoClient.call(streamCallType, callId);
+
+        // Key: Settings for an audio-only call should ideally be set here.
+        // This tells Stream that the *intention* from the start is audio-only.
         const callDataForRing = {
-          ring: true,
+          ring: true, // This makes the call ring for members.
           data: {
             members: [
-              { user_id: authState.streamId },
+              { user_id: authState.streamId! },
               { user_id: therapist.streamId },
             ],
             custom: {
-              caller_id: authState.streamId,
-              caller_name: authState.email,
+              caller_id: authState.streamId!,
+              caller_name: authState.email!, // Or authState.name
               therapist_user_db_id: therapist.id,
               therapist_stream_id: therapist.streamId,
-              intended_call_mode: callMode,
-              therapist_name: therapist.name, // Send therapist name for display
+              intended_call_mode: callMode, // Crucial for your backend and UI logic
+              therapist_name: therapist.name,
               call_rate: therapist.therapistRatePerMinute || 5,
             },
+            // --- IMPORTANT: Settings Override for Audio/Video ---
             settings_override: {
-              /* ... your settings ... */
+              video: {
+                camera_default_on: callMode === "video",
+                enabled: callMode === "video",
+                target_resolution: { width: 720, height: 1280 },
+              },
+              audio: {
+                mic_default_on: true,
+                default_device: "speaker" as const,
+              },
             },
           },
         };
+
+        console.log(
+          `[HomeScreen] Calling call.getOrCreate() for call ${callId} with mode ${callMode}`
+        );
         await call.getOrCreate(callDataForRing);
+        console.log(`[HomeScreen] Ringing call ${callId} initiated.`);
+
+        // --- NAVIGATE to the call screen for the caller ---
+        // The `callId` used here must be the ID part of the CID (not the full CID string)
+        router.push({
+          pathname: "/(app)/(authenticated)/consultation/[id]", // Use dynamic route format
+          params: { id: callId, initialCallMode: callMode }, // Pass callId as 'id'
+        });
+        // The global `RingingCalls` will handle UI for the *callee*.
+        // The caller navigates directly.
       } catch (error: any) {
-        console.error("[HomeScreen] initiateCall: Error:", error);
+        console.error(
+          "[HomeScreen] initiateCall: Error:",
+          error.message,
+          error
+        );
         Alert.alert(
           "Error Starting Call",
           error.message || "Could not initiate the call."
@@ -209,7 +236,7 @@ const HomeScreen = () => {
         setIsInitiatingCall(null);
       }
     },
-    [videoClient, authState, isInitiatingCall, isTherapist, API_URL] // Added API_URL
+    [videoClient, authState, isInitiatingCall, isTherapist, router, API_URL] // Added router
   );
 
   useFocusEffect(

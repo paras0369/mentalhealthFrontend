@@ -1,6 +1,6 @@
 // app/_layout.tsx
 import React, { useEffect, useState } from "react";
-import { Slot } from "expo-router";
+import { Slot, useRouter } from "expo-router";
 import "react-native-reanimated";
 import {
   DarkTheme,
@@ -38,6 +38,7 @@ const apiKey = process.env.EXPO_PUBLIC_STREAM_ACCESS_KEY as string;
 const RingingCalls = () => {
   const calls = useCalls().filter((c) => c.ringing);
   const ringingCall = calls[0];
+  const router = useRouter();
 
   if (!ringingCall) {
     return null;
