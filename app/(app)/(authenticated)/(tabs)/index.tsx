@@ -1,4 +1,4 @@
-// app/(app)/(authenticated)/(tabs)/index.tsx
+// Updated HomeScreen index.tsx - Remove ring, use custom notification
 import React, { useState, useCallback } from "react";
 import {
   View,
@@ -10,10 +10,10 @@ import {
   StyleSheet,
   Switch,
   Alert,
-  SafeAreaView, // For better screen spacing
-  Image, // If you add therapist profile pictures
+  SafeAreaView,
+  Image,
 } from "react-native";
-import { MaterialIcons, Ionicons } from "@expo/vector-icons"; // Ionicons for more options
+import { MaterialIcons, Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useAuth, API_URL } from "@/providers/AuthProvider";
 import { useStreamVideoClient } from "@stream-io/video-react-native-sdk";
@@ -21,22 +21,17 @@ import * as Crypto from "expo-crypto";
 
 // Define an interface for the Therapist data received from backend
 interface Therapist {
-  id: string; // MongoDB ID (_id)
-  name: string; // email for now, or actual name
-  streamId: string; // Stream ID for call
+  id: string;
+  name: string;
+  streamId: string;
   isAvailable: boolean;
   therapistRatePerMinute?: number;
-  // Consider adding:
-  // profileImageUrl?: string;
-  // specialties?: string[];
-  // experienceYears?: number;
 }
 
 // Interface for the therapist's own user data
 interface TherapistSelfData {
   isAvailable: boolean;
-  earningBalance?: number; // Make sure this is fetched if displayed
-  // Add other fields as needed
+  earningBalance?: number;
 }
 
 const HomeScreen = () => {
@@ -46,13 +41,11 @@ const HomeScreen = () => {
 
   // --- State Variables ---
   const [therapists, setTherapists] = useState<Therapist[]>([]);
-  const [isLoading, setIsLoading] = useState(false); // Combined loading state
-  const [error, setError] = useState<string | null>(null); // Combined error state
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [isInitiatingCall, setIsInitiatingCall] = useState<string | null>(null);
-
   const [therapistStatus, setTherapistStatus] = useState<boolean>(false);
-  // isUpdatingStatus is effectively covered by 'isLoading' when in therapist mode
 
   // --- API Callbacks ---
   const fetchData = useCallback(async () => {
@@ -64,9 +57,7 @@ const HomeScreen = () => {
 
     try {
       if (isTherapist) {
-        // Fetch Therapist's Own Status
         const response = await fetch(`${API_URL}/users/me`, {
-          // Using /users/me for consistency
           headers: {
             Authorization: `Bearer ${authState.jwt}`,
             "Content-Type": "application/json",
@@ -85,9 +76,7 @@ const HomeScreen = () => {
           selfData
         );
         setTherapistStatus(selfData.isAvailable);
-        // Potentially set earningBalance to authState here if needed globally
       } else {
-        // Fetch Available Therapists for Client
         const response = await fetch(`${API_URL}/therapists/available`, {
           headers: { Authorization: `Bearer ${authState.jwt}` },
         });
@@ -107,18 +96,18 @@ const HomeScreen = () => {
     } catch (err: any) {
       console.error("[HomeScreen] fetchData: Error:", err);
       setError(err.message || "Could not load data.");
-      if (!isTherapist) setTherapists([]); // Clear list on error for client
-      else setTherapistStatus(false); // Reset therapist status on error
+      if (!isTherapist) setTherapists([]);
+      else setTherapistStatus(false);
     } finally {
       setIsLoading(false);
     }
-  }, [authState.jwt, isTherapist, API_URL]); // Added API_URL
+  }, [authState.jwt, isTherapist, API_URL]);
 
   const toggleAvailability = useCallback(
     async (newValue: boolean) => {
       if (!authState.jwt || !isTherapist) return;
       console.log(`[HomeScreen] toggleAvailability: Setting to: ${newValue}`);
-      setIsLoading(true); // Use general loading state
+      setIsLoading(true);
       setError(null);
       try {
         const response = await fetch(`${API_URL}/therapists/me/availability`, {
@@ -140,12 +129,12 @@ const HomeScreen = () => {
       } catch (err: any) {
         console.error("[HomeScreen] toggleAvailability: Error:", err);
         setError(err.message || "Failed to update status.");
-        setTherapistStatus((prev) => !prev); // Revert UI on error
+        setTherapistStatus((prev) => !prev);
       } finally {
         setIsLoading(false);
       }
     },
-    [authState.jwt, isTherapist, API_URL] // Added API_URL
+    [authState.jwt, isTherapist, API_URL]
   );
 
   const initiateCall = useCallback(
@@ -169,16 +158,25 @@ const HomeScreen = () => {
       }
 
       setIsInitiatingCall(therapist.id + callMode);
-      const callId = Crypto.randomUUID(); // This will be the call_id part of the CID
-      const streamCallType = "default";
+      const callId = Crypto.randomUUID();
 
       try {
-        const call = videoClient.call(streamCallType, callId);
+        console.log(`[HomeScreen] Creating call ${callId} without ringing`);
 
-        // Key: Settings for an audio-only call should ideally be set here.
-        // This tells Stream that the *intention* from the start is audio-only.
-        const callDataForRing = {
-          ring: true, // This makes the call ring for members.
+        // Create the call instance first
+        const call = videoClient.call("default", callId);
+
+        // Configure call settings
+        if (callMode === "audio") {
+          await call.camera.disable();
+          await call.microphone.enable();
+        } else {
+          await call.camera.enable();
+          await call.microphone.enable();
+        }
+
+        // Create call WITHOUT ringing - no default Stream UI will show
+        await call.getOrCreate({
           data: {
             members: [
               { user_id: authState.streamId! },
@@ -186,14 +184,13 @@ const HomeScreen = () => {
             ],
             custom: {
               caller_id: authState.streamId!,
-              caller_name: authState.email!, // Or authState.name
+              caller_name: authState.email!,
               therapist_user_db_id: therapist.id,
               therapist_stream_id: therapist.streamId,
-              intended_call_mode: callMode, // Crucial for your backend and UI logic
+              intended_call_mode: callMode,
               therapist_name: therapist.name,
               call_rate: therapist.therapistRatePerMinute || 5,
             },
-            // --- IMPORTANT: Settings Override for Audio/Video ---
             settings_override: {
               video: {
                 camera_default_on: callMode === "video",
@@ -206,22 +203,46 @@ const HomeScreen = () => {
               },
             },
           },
-        };
-
-        console.log(
-          `[HomeScreen] Calling call.getOrCreate() for call ${callId} with mode ${callMode}`
-        );
-        await call.getOrCreate(callDataForRing);
-        console.log(`[HomeScreen] Ringing call ${callId} initiated.`);
-
-        // --- NAVIGATE to the call screen for the caller ---
-        // The `callId` used here must be the ID part of the CID (not the full CID string)
-        router.push({
-          pathname: "/(app)/(authenticated)/consultation/[id]", // Use dynamic route format
-          params: { id: callId, initialCallMode: callMode }, // Pass callId as 'id'
         });
-        // The global `RingingCalls` will handle UI for the *callee*.
-        // The caller navigates directly.
+
+        console.log(`[HomeScreen] Call ${callId} created successfully`);
+
+        // Send custom notification to therapist via backend
+        try {
+          await fetch(`${API_URL}/calls/notify-therapist`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${authState.jwt}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              therapistId: therapist.id,
+              callId: callId,
+              callMode: callMode,
+              callerName: authState.email,
+              callRate: therapist.therapistRatePerMinute || 5,
+            }),
+          });
+          console.log(`[HomeScreen] Notification sent to therapist`);
+        } catch (notificationError) {
+          console.error(
+            "[HomeScreen] Failed to send notification:",
+            notificationError
+          );
+          // Don't fail the call creation if notification fails
+        }
+
+        // Navigate to custom call screen AFTER call is created and notification sent
+        router.push({
+          pathname: "/(app)/(authenticated)/consultation/[id]",
+          params: {
+            id: callId,
+            initialCallMode: callMode,
+            therapistId: therapist.id,
+            therapistName: therapist.name,
+            callRate: (therapist.therapistRatePerMinute || 5).toString(),
+          },
+        });
       } catch (error: any) {
         console.error(
           "[HomeScreen] initiateCall: Error:",
@@ -236,7 +257,7 @@ const HomeScreen = () => {
         setIsInitiatingCall(null);
       }
     },
-    [videoClient, authState, isInitiatingCall, isTherapist, router, API_URL] // Added router
+    [videoClient, authState, isInitiatingCall, isTherapist, router, API_URL]
   );
 
   useFocusEffect(
@@ -298,8 +319,8 @@ const HomeScreen = () => {
                 My Availability
               </Text>
               <Switch
-                trackColor={{ false: "#E5E7EB", true: "#60A5FA" }} // Tailwind slate-200, blue-400
-                thumbColor={therapistStatus ? "#2563EB" : "#F9FAFB"} // Tailwind blue-600, slate-50
+                trackColor={{ false: "#E5E7EB", true: "#60A5FA" }}
+                thumbColor={therapistStatus ? "#2563EB" : "#F9FAFB"}
                 ios_backgroundColor="#E5E7EB"
                 onValueChange={toggleAvailability}
                 value={therapistStatus}
@@ -373,7 +394,6 @@ const HomeScreen = () => {
         renderItem={({ item }) => (
           <View className="bg-white rounded-xl shadow-lg m-3 overflow-hidden">
             <View className="p-5">
-              {/* Future: <Image source={{ uri: item.profileImageUrl || 'default_placeholder_url' }} className="w-16 h-16 rounded-full mr-4" /> */}
               <View className="flex-1">
                 <Text className="text-xl font-semibold text-slate-800 mb-1">
                   {item.name || "Therapist"}

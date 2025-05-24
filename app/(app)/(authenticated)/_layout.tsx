@@ -2,6 +2,7 @@
 import { useAuth } from "@/providers/AuthProvider";
 import { Stack, Redirect, useRouter } from "expo-router";
 import React from "react";
+import CallNotificationListener from "@/components/CallNotificationListener";
 
 const AuthenticatedLayout = () => {
   const { authState } = useAuth();
@@ -18,21 +19,25 @@ const AuthenticatedLayout = () => {
     return <Redirect href="/login" />;
   }
 
-  console.log(
-    "AuthenticatedLayout: Rendering authenticated stack (video/calls only)"
-  );
-  return (
-    <Stack>
-      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+  console.log("AuthenticatedLayout: Rendering authenticated stack");
 
-      <Stack.Screen
-        name="consultation/[id]"
-        options={{
-          title: "Consultation Call",
-          headerBackTitle: "Back",
-        }}
-      />
-    </Stack>
+  return (
+    <>
+      <Stack>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+
+        <Stack.Screen
+          name="consultation/[id]"
+          options={{
+            title: "Consultation Call",
+            headerBackTitle: "Back",
+          }}
+        />
+      </Stack>
+
+      {/* Add CallNotificationListener to handle incoming calls */}
+      <CallNotificationListener />
+    </>
   );
 };
 

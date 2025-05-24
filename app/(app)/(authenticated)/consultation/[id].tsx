@@ -5,57 +5,60 @@ import {
   View,
   Text,
   ActivityIndicator,
-  Alert,
   StyleSheet,
   TouchableOpacity,
   AppState,
   SafeAreaView,
-  Image, // For avatars in future
+  Dimensions,
+  StatusBar,
+  Alert,
 } from "react-native";
 import {
   StreamCall,
   Call,
   useStreamVideoClient,
-  CallContent,
   CallingState,
   useCallStateHooks,
-  StreamVideoParticipant, // Type for participant object
-  useCall, // Hook to get the call object within StreamCall context
+  StreamVideoParticipant,
+  useCall,
+  ParticipantView,
+  CallControls,
 } from "@stream-io/video-react-native-sdk";
 import { CustomCallControls } from "@/components/CustomCallControls";
 import { CallDurationBadge } from "@/components/CallDurationBadge";
 import { useAuth } from "@/providers/AuthProvider";
 import { Ionicons } from "@expo/vector-icons";
-import InCallManager from "react-native-incall-manager";
 
+const { width, height } = Dimensions.get("window");
 const LOG_PREFIX = "ConsultationPage";
 
 const ConsultationPage = () => {
   const {
     id: callIdFromRoute,
-    initialCallMode = "video", // Default to "video" if not provided
+    initialCallMode = "video",
+    therapistId,
+    therapistName,
+    callRate,
   } = useLocalSearchParams<{
     id: string;
     initialCallMode?: "audio" | "video";
+    therapistId?: string;
+    therapistName?: string;
+    callRate?: string;
   }>();
 
   const router = useRouter();
-  const videoClient = useStreamVideoClient(); // Get the video client from context
+  const videoClient = useStreamVideoClient();
   const { authState } = useAuth();
 
   const [callObject, setCallObject] = useState<Call | null>(null);
-  const [currentCallingState, setCurrentCallingState] = useState<CallingState>(
-    CallingState.UNKNOWN
-  );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isCallReady, setIsCallReady] = useState(false);
 
-  // Ref to store the subscription to call state changes
-  const callStateSubscription = useRef<{ unsubscribe: () => void } | null>(
-    null
-  );
+  const mountedRef = useRef(true);
+  const hasJoinedRef = useRef(false);
 
-  // Memoized logging function
   const log = useCallback(
     (
       level: "log" | "warn" | "error",
@@ -71,286 +74,222 @@ const ConsultationPage = () => {
     [callIdFromRoute]
   );
 
-  // Effect to initialize, join the call, and manage camera/mic based on mode
+  // Initialize and join call
   useEffect(() => {
-    if (!videoClient) {
-      log("warn", "SetupCallEffect", "Video client is not available yet.");
-      // setError("Video client not ready."); // Optionally set error
-      // setIsLoading(false); // Optionally stop loading
-      return; // Wait for videoClient
-    }
-    if (!callIdFromRoute) {
-      log("error", "SetupCallEffect", "Call ID is missing from route params.");
-      setError("Call ID missing.");
-      setIsLoading(false);
-      return;
-    }
+    let stateUnsubscribe: (() => void) | null = null;
 
-    let unmounted = false;
-    let currentCallInstance: Call; // Use non-nullable Call type here
-
-    const initializeAndJoinCall = async () => {
-      log(
-        "log",
-        "SetupCallEffect",
-        `Initializing for callId: ${callIdFromRoute}, mode: ${initialCallMode}`
-      );
-
-      // Create or get the call instance
-      currentCallInstance = videoClient.call("default", callIdFromRoute);
-      setCallObject(currentCallInstance); // Provide call object to StreamCall
-
-      // Subscribe to call state changes
-      if (callStateSubscription.current) {
-        callStateSubscription.current.unsubscribe();
-      }
-      callStateSubscription.current =
-        currentCallInstance.state.callingState$.subscribe((newState) => {
-          if (unmounted) return;
-          log("log", "CallStateUpdate", `New calling state: ${newState}`);
-          setCurrentCallingState(newState);
-
-          if (newState === CallingState.LEFT) {
-            log(
-              "log",
-              "CallStateUpdate",
-              "Call state is LEFT. Stopping InCallManager and navigating."
-            );
-            InCallManager.stop();
-            if (router.canGoBack()) {
-              router.back();
-            } else {
-              router.replace("/(app)/(authenticated)/(tabs)"); // Fallback navigation
-            }
-          }
-        });
-
-      try {
-        log("log", "SetupCallEffect", "Attempting to join/create call...");
-        // Join the call (or create if it doesn't exist)
-        // The `ring: false` is important here if the call was already initiated (e.g. by RingingCallContent)
-        // and you're just joining the ongoing session.
-        // If this screen can be the first to "create" a non-ringing call, `create: true` is fine.
-        await currentCallInstance.join({ create: true });
-        if (unmounted) return;
-        log("log", "SetupCallEffect", "Successfully joined call.");
-
-        // Start InCallManager AFTER successful join
-        InCallManager.start({ media: initialCallMode });
-        log(
-          "log",
-          "SetupCallEffect",
-          `InCallManager started with media type: ${initialCallMode}`
-        );
-
-        if (initialCallMode === "audio") {
-          log("log", "SetupCallEffect", "Audio call mode selected.");
-          if (currentCallInstance.camera.state.status === "enabled") {
-            log(
-              "log",
-              "SetupCallEffect",
-              "Camera is ON, disabling for audio call..."
-            );
-            await currentCallInstance.camera.disable();
-            log("log", "SetupCallEffect", "Camera disabled for audio call.");
-          } else {
-            log(
-              "log",
-              "SetupCallEffect",
-              "Camera is already OFF for audio call."
-            );
-          }
-          // Ensure microphone is enabled by default for audio call (can be toggled by user)
-          if (currentCallInstance.microphone.state.status === "disabled") {
-            log(
-              "log",
-              "SetupCallEffect",
-              "Microphone is OFF, enabling for audio call..."
-            );
-            await currentCallInstance.microphone.enable();
-          }
-          InCallManager.setForceSpeakerphoneOn(false); // Default to earpiece for audio
-          log(
-            "log",
-            "SetupCallEffect",
-            "Speakerphone set to OFF (earpiece) for audio call."
-          );
-        } else {
-          // Video call mode
-          log("log", "SetupCallEffect", "Video call mode selected.");
-          if (currentCallInstance.camera.state.status === "disabled") {
-            log(
-              "log",
-              "SetupCallEffect",
-              "Camera is OFF, enabling for video call..."
-            );
-            await currentCallInstance.camera.enable();
-            log("log", "SetupCallEffect", "Camera enabled for video call.");
-          } else {
-            log(
-              "log",
-              "SetupCallEffect",
-              "Camera is already ON for video call."
-            );
-          }
-          // Ensure microphone is enabled by default for video call
-          if (currentCallInstance.microphone.state.status === "disabled") {
-            await currentCallInstance.microphone.enable();
-          }
-          InCallManager.setForceSpeakerphoneOn(true); // Default to speaker for video
-          log(
-            "log",
-            "SetupCallEffect",
-            "Speakerphone set to ON for video call."
-          );
-        }
-
+    const initializeCall = async () => {
+      if (!videoClient || !callIdFromRoute || !mountedRef.current) {
+        log("error", "Init", "Missing video client or call ID");
+        setError("Unable to initialize call");
         setIsLoading(false);
-        setError(null);
-      } catch (err: any) {
-        log(
-          "error",
-          "SetupCallEffect",
-          `Failed to join call ${currentCallInstance?.id}:`,
-          err.message,
-          err
-        );
-        if (!unmounted) {
-          setError(err.message || "Failed to join the call.");
-          setIsLoading(false);
-          setCallObject(null); // Clear call object on error
-          InCallManager.stop(); // Stop InCallManager if join fails
-        }
-      }
-    };
-
-    initializeAndJoinCall();
-
-    return () => {
-      unmounted = true;
-      log(
-        "log",
-        "CleanupEffect",
-        `Unmounting ConsultationPage for call ${currentCallInstance?.id}.`
-      );
-      if (callStateSubscription.current) {
-        callStateSubscription.current.unsubscribe();
-        callStateSubscription.current = null;
-      }
-      // If call is still active and component unmounts unexpectedly (e.g., navigating away without hangup)
-      // The LEFT state handler should ideally manage InCallManager.stop().
-      // However, if there's a risk of it not being called, consider:
-      // if (currentCallInstance && currentCallInstance.state.callingState === CallingState.JOINED) {
-      //   log("warn", "CleanupEffect", "Call still joined on unmount, stopping InCallManager as a precaution.");
-      //   InCallManager.stop();
-      // }
-    };
-  }, [videoClient, callIdFromRoute, initialCallMode, log, router]); // Added API_URL back if log needs it
-
-  // App State Handling (primarily for video camera)
-  useEffect(() => {
-    const handleAppStateChange = async (nextAppState: string) => {
-      if (
-        !callObject ||
-        callObject.state.callingState !== CallingState.JOINED ||
-        initialCallMode !== "video"
-      ) {
         return;
       }
 
-      log("log", "AppStateChange", `App state changed to: ${nextAppState}`);
-      if (nextAppState.match(/inactive|background/)) {
-        if (callObject.camera.state.status === "enabled") {
-          log(
-            "log",
-            "AppStateChange",
-            "App backgrounded (video call), disabling camera."
-          );
-          await callObject.camera
-            .disable()
-            .catch((e) =>
-              log(
-                "warn",
-                "AppStateChange",
-                "Error disabling camera on background",
-                e
-              )
-            );
+      try {
+        log(
+          "log",
+          "Init",
+          `Initializing call: ${callIdFromRoute}, mode: ${initialCallMode}`
+        );
+
+        // Create call instance
+        const call = videoClient.call("default", callIdFromRoute);
+
+        // Set up call state subscription before joining
+        const subscription = call.state.callingState$.subscribe((newState) => {
+          if (!mountedRef.current) return;
+
+          log("log", "StateChange", `Call state: ${newState}`);
+
+          if (newState === CallingState.JOINED && !hasJoinedRef.current) {
+            hasJoinedRef.current = true;
+            setIsCallReady(true);
+            setIsLoading(false);
+            log("log", "StateChange", "Call successfully joined and ready");
+          } else if (newState === CallingState.LEFT) {
+            log("log", "StateChange", "Call ended, navigating back");
+            handleCallEnd();
+          }
+        });
+        stateUnsubscribe = () => subscription.unsubscribe();
+
+        // Configure call settings before joining
+        if (initialCallMode === "audio") {
+          await call.camera.disable();
+          await call.microphone.enable();
+        } else {
+          await call.camera.enable();
+          await call.microphone.enable();
         }
-      } else if (nextAppState === "active") {
-        if (callObject.camera.state.status === "disabled") {
-          // Only enable if it was disabled by this mechanism
-          log(
-            "log",
-            "AppStateChange",
-            "App active (video call), re-enabling camera."
-          );
-          await callObject.camera
-            .enable()
-            .catch((e) =>
+
+        // Set the call object first
+        setCallObject(call);
+
+        // Handle different scenarios with the simplified approach:
+        // 1. Caller: Call should exist now since we create before navigating
+        // 2. Callee: Call exists and we need to join it
+
+        try {
+          // Try to get the existing call
+          await call.get();
+          log("log", "Init", "Call exists, joining...");
+
+          // Join the call directly
+          await call.join();
+        } catch (getError) {
+          log("log", "Init", "Call doesn't exist yet, retrying...");
+
+          // For video calls especially, there might be a slight delay
+          // Retry a few times with shorter intervals
+          let attempts = 0;
+          const maxAttempts = 20; // 2 seconds total with 100ms intervals
+          let callFound = false;
+
+          while (attempts < maxAttempts && mountedRef.current && !callFound) {
+            try {
+              await call.get();
               log(
-                "warn",
-                "AppStateChange",
-                "Error enabling camera on active",
-                e
-              )
+                "log",
+                "Init",
+                `Call found on attempt ${attempts + 1}, joining...`
+              );
+              await call.join();
+              callFound = true;
+              break;
+            } catch (error) {
+              attempts++;
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+          }
+
+          if (!callFound) {
+            throw new Error(
+              "Call was not found after multiple attempts. Please try again."
             );
+          }
+        }
+        log("log", "Init", "Call join initiated");
+      } catch (err: any) {
+        log("error", "Init", "Failed to initialize call:", err);
+        if (mountedRef.current) {
+          setError(err.message || "Failed to join call");
+          setIsLoading(false);
         }
       }
     };
-    const appStateSubscription = AppState.addEventListener(
+
+    initializeCall();
+
+    return () => {
+      mountedRef.current = false;
+      if (stateUnsubscribe) {
+        stateUnsubscribe();
+      }
+    };
+  }, [
+    videoClient,
+    callIdFromRoute,
+    initialCallMode,
+    authState.streamId,
+    authState.email,
+    therapistName,
+    callRate,
+    log,
+  ]);
+
+  // App state management for video calls
+  useEffect(() => {
+    if (initialCallMode !== "video" || !callObject) return;
+
+    const handleAppStateChange = async (nextAppState: string) => {
+      if (!isCallReady) return;
+
+      log("log", "AppState", `App state: ${nextAppState}`);
+
+      try {
+        if (nextAppState.match(/inactive|background/)) {
+          await callObject.camera.disable();
+        } else if (nextAppState === "active") {
+          await callObject.camera.enable();
+        }
+      } catch (error: any) {
+        log("warn", "AppState", "Camera toggle error:", error);
+      }
+    };
+
+    const subscription = AppState.addEventListener(
       "change",
       handleAppStateChange
     );
-    return () => appStateSubscription.remove();
-  }, [callObject, initialCallMode, log]);
+    return () => subscription?.remove();
+  }, [callObject, isCallReady, initialCallMode, log]);
+
+  const handleCallEnd = useCallback(() => {
+    log("log", "HandleEnd", "Handling call end");
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace("/(app)/(authenticated)/(tabs)");
+    }
+  }, [router, log]);
 
   const handleHangup = useCallback(async () => {
-    log("log", "HandleHangup", "User initiated hangup.");
     if (!callObject) {
-      log("warn", "HandleHangup", "Call object is null, cannot leave.");
-      // Navigate back if no call object
-      if (router.canGoBack()) router.back();
-      else router.replace("/(app)/(authenticated)/(tabs)");
+      handleCallEnd();
       return;
     }
-    setIsLoading(true); // Show loading indicator while leaving
-    try {
-      await callObject.leave(); // This should trigger the CallingState.LEFT subscription
-      log("log", "HandleHangup", "call.leave() executed.");
-      // Navigation is now handled by the LEFT state subscription
-    } catch (e: any) {
-      log("error", "HandleHangup", "Error leaving call:", e.message);
-      // Fallback navigation if leave() fails or subscription doesn't trigger nav quickly
-      InCallManager.stop(); // Ensure InCallManager is stopped
-      if (router.canGoBack()) router.back();
-      else router.replace("/(app)/(authenticated)/(tabs)");
-      setIsLoading(false); // Reset loading state on error
-    }
-  }, [callObject, router, log]);
 
-  // --- Custom UI for Audio Calls ---
-  const AudioCallUIComponent = () => {
-    const call = useCall(); // Get call from StreamCall context
-    const { useParticipants, useLocalParticipant } = useCallStateHooks();
+    log("log", "Hangup", "User initiated hangup");
+
+    try {
+      // Check if call is still active before trying to leave
+      if (callObject.state.callingState !== CallingState.LEFT) {
+        await callObject.leave();
+        log("log", "Hangup", "Successfully left call");
+      }
+    } catch (err: any) {
+      log("error", "Hangup", "Leave call error:", err);
+    } finally {
+      // Always navigate back after hangup attempt
+      handleCallEnd();
+    }
+  }, [callObject, handleCallEnd, log]);
+
+  // Custom Audio Call UI Component
+  const CustomAudioCallUI = () => {
+    const call = useCall();
+    const { useParticipants, useLocalParticipant, useCallCallingState } =
+      useCallStateHooks();
     const participants = useParticipants();
     const localParticipant = useLocalParticipant();
+    const callingState = useCallCallingState();
 
-    // Determine the other party
-    const remoteParticipants = participants.filter(
-      (p: StreamVideoParticipant) => p.sessionId !== localParticipant?.sessionId
+    const remoteParticipant = participants.find(
+      (p) => p.sessionId !== localParticipant?.sessionId
     );
-    const otherParty: StreamVideoParticipant | undefined =
-      remoteParticipants[0];
 
-    const otherPartyName =
-      otherParty?.name || otherParty?.userId || "Connecting...";
-    const yourName = authState.name || authState.email || "You";
+    const getParticipantName = (participant?: StreamVideoParticipant) => {
+      return (
+        participant?.name || participant?.userId || therapistName || "Unknown"
+      );
+    };
 
     return (
-      <SafeAreaView style={styles.audioCallContainer}>
-        <View style={styles.headerInfo}>
-          {call && call.state.callingState === CallingState.JOINED && (
+      <SafeAreaView style={styles.audioContainer}>
+        <StatusBar barStyle="light-content" backgroundColor="#1A202C" />
+
+        {/* Animated background */}
+        <View style={styles.audioBackground}>
+          <View style={[styles.ripple, styles.ripple1]} />
+          <View style={[styles.ripple, styles.ripple2]} />
+          <View style={[styles.ripple, styles.ripple3]} />
+        </View>
+
+        {/* Header with call info */}
+        <View style={styles.audioHeader}>
+          <Text style={styles.audioCallLabel}>Audio Call</Text>
+          {callingState === CallingState.JOINED && (
             <CallDurationBadge
               textClassName="text-lg text-white"
               iconColor="white"
@@ -359,103 +298,262 @@ const ConsultationPage = () => {
           )}
         </View>
 
-        <View style={styles.participantsInfo}>
-          {/* Other Party Display */}
-          <View style={styles.participantDisplay}>
-            <View style={styles.avatarPlaceholder}>
-              <Ionicons
-                name="person-outline"
-                size={80}
-                color="rgba(255,255,255,0.7)"
-              />
+        {/* Main content */}
+        <View style={styles.audioMainContent}>
+          {/* Remote participant display */}
+          <View style={styles.remoteParticipantSection}>
+            <View style={styles.avatarContainer}>
+              <View style={styles.avatar}>
+                <Ionicons
+                  name="person"
+                  size={60}
+                  color="rgba(255,255,255,0.8)"
+                />
+              </View>
+              {remoteParticipant?.isSpeaking && (
+                <View style={styles.speakingRing} />
+              )}
             </View>
-            <Text style={styles.participantName}>{otherPartyName}</Text>
-            <Text style={styles.participantRoleHint}>
+
+            <Text style={styles.remoteParticipantName}>
+              {remoteParticipant
+                ? getParticipantName(remoteParticipant)
+                : "Connecting..."}
+            </Text>
+            <Text style={styles.participantRole}>
               {authState.isTherapist ? "Client" : "Therapist"}
             </Text>
+
+            {/* Connection status */}
+            <View style={styles.statusContainer}>
+              <View
+                style={[
+                  styles.statusDot,
+                  {
+                    backgroundColor:
+                      callingState === CallingState.JOINED
+                        ? "#10B981"
+                        : "#F59E0B",
+                  },
+                ]}
+              />
+              <Text style={styles.statusText}>
+                {callingState === CallingState.JOINED
+                  ? "Connected"
+                  : "Connecting..."}
+              </Text>
+            </View>
           </View>
 
-          {/* Your Display */}
-          <View style={styles.participantDisplayMe}>
-            <Text style={styles.yourIdentifier}>You</Text>
-            <Text style={styles.yourName}>{yourName}</Text>
+          {/* Local participant info */}
+          <View style={styles.localParticipantSection}>
+            <Text style={styles.localParticipantLabel}>You</Text>
+            <Text style={styles.localParticipantName}>
+              {authState.name || authState.email || "You"}
+            </Text>
+            {localParticipant?.isSpeaking && (
+              <Text style={styles.speakingIndicator}>Speaking...</Text>
+            )}
           </View>
         </View>
-        {/* CallControls are rendered outside, overlaid */}
+
+        {/* Custom controls */}
+        <View style={styles.controlsContainer}>
+          <CustomCallControls
+            onHangupCallHandler={handleHangup}
+            callMode="audio"
+          />
+        </View>
       </SafeAreaView>
     );
   };
 
-  // --- Render Logic ---
+  // Custom Video Call UI Component
+  const CustomVideoCallUI = () => {
+    const call = useCall();
+    const { useParticipants, useLocalParticipant, useCallCallingState } =
+      useCallStateHooks();
+    const participants = useParticipants();
+    const localParticipant = useLocalParticipant();
+    const callingState = useCallCallingState();
+
+    const remoteParticipant = participants.find(
+      (p) => p.sessionId !== localParticipant?.sessionId
+    );
+
+    const renderVideoLayout = () => {
+      if (!remoteParticipant) {
+        // Only local participant - waiting state
+        return (
+          <View style={styles.waitingContainer}>
+            <View style={styles.localVideoLarge}>
+              {localParticipant && (
+                <ParticipantView
+                  participant={localParticipant}
+                  style={styles.participantVideoFull}
+                />
+              )}
+              <View style={styles.waitingOverlay}>
+                <Text style={styles.waitingText}>
+                  Waiting for {therapistName || "other participant"}...
+                </Text>
+              </View>
+            </View>
+          </View>
+        );
+      }
+
+      // Two participants - main + pip layout
+      return (
+        <View style={styles.dualVideoContainer}>
+          {/* Main video - remote participant */}
+          <View style={styles.mainVideo}>
+            <ParticipantView
+              participant={remoteParticipant}
+              style={styles.participantVideoFull}
+            />
+            <View style={styles.mainVideoOverlay}>
+              <Text style={styles.participantLabel}>
+                {remoteParticipant.name ||
+                  remoteParticipant.userId ||
+                  therapistName ||
+                  "Other Participant"}
+              </Text>
+              {remoteParticipant.isSpeaking && (
+                <View style={styles.speakingDot} />
+              )}
+            </View>
+          </View>
+
+          {/* Picture-in-picture - local participant */}
+          {localParticipant && (
+            <View style={styles.pipVideo}>
+              <ParticipantView
+                participant={localParticipant}
+                style={styles.participantVideoFull}
+              />
+              <Text style={styles.pipLabel}>You</Text>
+              {localParticipant.isSpeaking && (
+                <View style={[styles.speakingDot, styles.pipSpeakingDot]} />
+              )}
+            </View>
+          )}
+        </View>
+      );
+    };
+
+    return (
+      <View style={styles.videoContainer}>
+        <StatusBar
+          barStyle="light-content"
+          backgroundColor="transparent"
+          translucent
+        />
+
+        {/* Custom header */}
+        <View style={styles.videoHeader}>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={() => console.log("Minimize")}
+          >
+            <Ionicons name="chevron-down" size={24} color="white" />
+          </TouchableOpacity>
+
+          <View style={styles.headerCenter}>
+            <Text style={styles.headerTitle}>Video Call</Text>
+            {callingState === CallingState.JOINED && (
+              <CallDurationBadge
+                textClassName="text-sm text-white opacity-80"
+                iconColor="white"
+                iconSize={16}
+              />
+            )}
+          </View>
+
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={() => console.log("Menu")}
+          >
+            <Ionicons name="ellipsis-horizontal" size={24} color="white" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Video content */}
+        <View style={styles.videoContent}>{renderVideoLayout()}</View>
+
+        {/* Connection status */}
+        {callingState !== CallingState.JOINED && (
+          <View style={styles.connectionBanner}>
+            <ActivityIndicator size="small" color="white" />
+            <Text style={styles.connectionText}>
+              {callingState === CallingState.JOINING
+                ? "Connecting..."
+                : "Establishing connection..."}
+            </Text>
+          </View>
+        )}
+
+        {/* Custom controls */}
+        <View style={styles.controlsContainer}>
+          <CustomCallControls
+            onHangupCallHandler={handleHangup}
+            callMode="video"
+          />
+        </View>
+      </View>
+    );
+  };
+
+  // Loading state
   if (isLoading) {
     return (
-      <View style={styles.centerContainer}>
+      <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color="#007BFF" />
-        <Text style={styles.statusText}>
-          {currentCallingState === CallingState.JOINING
-            ? "Joining Call..."
-            : "Loading Call..."}
+        <Text style={styles.loadingText}>
+          {callObject ? "Joining call..." : "Initializing..."}
         </Text>
-        <Stack.Screen options={{ title: "Connecting..." }} />
+        <Stack.Screen
+          options={{ title: "Connecting...", headerShown: false }}
+        />
       </View>
     );
   }
 
+  // Error state
   if (error) {
     return (
-      <View style={styles.centerContainer}>
-        <Text style={styles.errorText}>Error: {error}</Text>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() => {
-            InCallManager.stop(); // Ensure manager is stopped
-            router.canGoBack()
-              ? router.back()
-              : router.replace("/(app)/(authenticated)/(tabs)");
-          }}
-        >
-          <Text style={styles.buttonText}>Go Back</Text>
+      <View style={styles.errorContainer}>
+        <Ionicons name="warning" size={48} color="#EF4444" />
+        <Text style={styles.errorTitle}>Connection Error</Text>
+        <Text style={styles.errorMessage}>{error}</Text>
+        <TouchableOpacity style={styles.errorButton} onPress={handleCallEnd}>
+          <Text style={styles.errorButtonText}>Go Back</Text>
         </TouchableOpacity>
-        <Stack.Screen options={{ title: "Error" }} />
+        <Stack.Screen options={{ title: "Error", headerShown: false }} />
       </View>
     );
   }
 
-  if (
-    !callObject ||
-    currentCallingState === CallingState.LEFT ||
-    currentCallingState === CallingState.UNKNOWN
-  ) {
-    log(
-      "warn",
-      "Render",
-      `Call object null or state is ${currentCallingState}. Showing ended/fallback UI.`
-    );
-    // This state should ideally be caught by the LEFT subscription, but good fallback
-    InCallManager.stop(); // Ensure manager is stopped
+  // No call object
+  if (!callObject) {
     return (
-      <View style={styles.centerContainer}>
-        <Text style={styles.statusText}>
-          {currentCallingState === CallingState.LEFT
-            ? "Call has ended."
-            : "Could not establish call connection."}
+      <View style={styles.errorContainer}>
+        <Ionicons name="call-outline" size={48} color="#6B7280" />
+        <Text style={styles.errorTitle}>Call Not Found</Text>
+        <Text style={styles.errorMessage}>
+          Unable to find the requested call.
         </Text>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() =>
-            router.canGoBack()
-              ? router.back()
-              : router.replace("/(app)/(authenticated)/(tabs)")
-          }
-        >
-          <Text style={styles.buttonText}>Go Home</Text>
+        <TouchableOpacity style={styles.errorButton} onPress={handleCallEnd}>
+          <Text style={styles.errorButtonText}>Go Back</Text>
         </TouchableOpacity>
-        <Stack.Screen options={{ title: "Call Ended" }} />
+        <Stack.Screen
+          options={{ title: "Call Not Found", headerShown: false }}
+        />
       </View>
     );
   }
 
-  // Main render based on call mode
+  // Main render with custom UI
   return (
     <View style={styles.container}>
       <Stack.Screen
@@ -463,114 +561,356 @@ const ConsultationPage = () => {
           title: `${
             initialCallMode.charAt(0).toUpperCase() + initialCallMode.slice(1)
           } Call`,
+          headerShown: false,
         }}
       />
+
       <StreamCall call={callObject}>
+        {/* Render custom UI based on call mode */}
         {initialCallMode === "audio" ? (
-          <>
-            <AudioCallUIComponent />
-            <CustomCallControls
-              onHangupCallHandler={handleHangup}
-              callMode="audio"
-            />
-          </>
+          <CustomAudioCallUI />
         ) : (
-          // Video Call
-          <CallContent
-            onHangupCallHandler={handleHangup}
-            CallControls={(props) => (
-              <CustomCallControls {...props} callMode="video" />
-            )}
-            // You can add other CallContent props here if needed
-            // layout="grid" // or "spotlight"
-          />
+          <CustomVideoCallUI />
         )}
       </StreamCall>
     </View>
   );
 };
 
-// --- Styles ---
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "black" }, // Main container for the whole screen
-  centerContainer: {
+  container: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
+
+  // Loading states
+  loadingContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    padding: 20,
-    backgroundColor: "white", // For loading/error states
+    backgroundColor: "#1A202C",
   },
-  statusText: { marginTop: 10, fontSize: 16, color: "grey" },
-  errorText: { marginTop: 10, fontSize: 16, color: "red", textAlign: "center" },
-  button: {
-    marginTop: 20,
-    backgroundColor: "#007AFF",
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 5,
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: "#9CA3AF",
   },
-  buttonText: { color: "white", fontSize: 16, fontWeight: "bold" },
 
-  // Styles for AudioCallUIComponent
-  audioCallContainer: {
-    flex: 1, // Takes up all available space within its parent (StreamCall)
-    justifyContent: "space-around", // Distributes space for header, participants, self-info
-    alignItems: "center",
-    backgroundColor: "#1A202C", // Darker, slightly blueish grey (like dark mode slate-800/900)
-    paddingTop: 60, // Space for status bar and header elements
-    paddingBottom: 120, // Space for controls at the bottom
-  },
-  headerInfo: {
-    position: "absolute", // Keep it at the top
-    // top: Platform.OS === "ios" ? 60 : 30, // Adjust for status bar height
-    alignSelf: "center", // Center the duration badge
-  },
-  participantsInfo: {
-    flex: 1, // Allow this section to grow
-    justifyContent: "center", // Center main participant info vertically
-    alignItems: "center",
-    width: "100%",
-  },
-  participantDisplay: {
-    alignItems: "center",
-    marginBottom: 40, // Space between other party and self-identifier
-  },
-  avatarPlaceholder: {
-    width: 160, // Larger avatar
-    height: 160,
-    borderRadius: 80,
-    backgroundColor: "rgba(255,255,255,0.08)", // More subtle placeholder
+  // Error states
+  errorContainer: {
+    flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 20,
-    borderWidth: 2,
-    borderColor: "rgba(255,255,255,0.1)",
+    backgroundColor: "#1A202C",
+    padding: 32,
   },
-  participantName: {
-    fontSize: 28, // Larger name
-    fontWeight: "600", // Semi-bold
-    color: "white",
+  errorTitle: {
+    fontSize: 24,
+    fontWeight: "600",
+    color: "#EF4444",
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  errorMessage: {
+    fontSize: 16,
+    color: "#9CA3AF",
     textAlign: "center",
+    marginBottom: 24,
+  },
+  errorButton: {
+    backgroundColor: "#3B82F6",
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  errorButtonText: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+
+  // Video call styles
+  videoContainer: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
+  videoHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingTop: 50,
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+  },
+  headerButton: {
+    padding: 8,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.2)",
+  },
+  headerCenter: {
+    alignItems: "center",
+  },
+  headerTitle: {
+    color: "white",
+    fontSize: 18,
+    fontWeight: "600",
     marginBottom: 4,
   },
-  participantRoleHint: {
+  videoContent: {
+    flex: 1,
+  },
+  connectionBanner: {
+    position: "absolute",
+    top: 120,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.7)",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    zIndex: 5,
+  },
+  connectionText: {
+    color: "white",
+    marginLeft: 8,
+    fontSize: 14,
+  },
+
+  // Video layouts
+  waitingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  localVideoLarge: {
+    width: width * 0.85,
+    height: height * 0.65,
+    borderRadius: 16,
+    overflow: "hidden",
+    backgroundColor: "#1F2937",
+  },
+  waitingOverlay: {
+    position: "absolute",
+    bottom: 20,
+    alignSelf: "center",
+  },
+  waitingText: {
+    color: "white",
+    fontSize: 18,
+    fontWeight: "500",
+    textAlign: "center",
+  },
+
+  dualVideoContainer: {
+    flex: 1,
+  },
+  mainVideo: {
+    flex: 1,
+    margin: 8,
+    borderRadius: 16,
+    overflow: "hidden",
+    backgroundColor: "#1F2937",
+  },
+  mainVideoOverlay: {
+    position: "absolute",
+    bottom: 16,
+    left: 16,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  participantLabel: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "500",
+    marginRight: 8,
+  },
+  speakingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#10B981",
+  },
+
+  pipVideo: {
+    position: "absolute",
+    top: 130,
+    right: 16,
+    width: 120,
+    height: 160,
+    borderRadius: 12,
+    overflow: "hidden",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.3)",
+    backgroundColor: "#1F2937",
+  },
+  pipLabel: {
+    position: "absolute",
+    bottom: 8,
+    alignSelf: "center",
+    color: "white",
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  pipSpeakingDot: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+  },
+
+  participantVideoFull: {
+    flex: 1,
+  },
+
+  // Audio call styles
+  audioContainer: {
+    flex: 1,
+    backgroundColor: "#1A202C",
+  },
+  audioBackground: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  ripple: {
+    position: "absolute",
+    borderRadius: 300,
+    borderWidth: 1,
+    borderColor: "rgba(59, 130, 246, 0.2)",
+  },
+  ripple1: {
+    width: 250,
+    height: 250,
+    top: "35%",
+    left: "50%",
+    marginLeft: -125,
+    marginTop: -125,
+  },
+  ripple2: {
+    width: 350,
+    height: 350,
+    top: "35%",
+    left: "50%",
+    marginLeft: -175,
+    marginTop: -175,
+  },
+  ripple3: {
+    width: 450,
+    height: 450,
+    top: "35%",
+    left: "50%",
+    marginLeft: -225,
+    marginTop: -225,
+  },
+
+  audioHeader: {
+    alignItems: "center",
+    paddingTop: 60,
+    paddingBottom: 20,
+  },
+  audioCallLabel: {
+    fontSize: 16,
+    color: "rgba(255,255,255,0.7)",
+    marginBottom: 8,
+  },
+
+  audioMainContent: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 32,
+  },
+
+  remoteParticipantSection: {
+    alignItems: "center",
+    marginBottom: 60,
+  },
+  avatarContainer: {
+    position: "relative",
+    marginBottom: 24,
+  },
+  avatar: {
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: "rgba(255,255,255,0.1)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  speakingRing: {
+    position: "absolute",
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    borderWidth: 3,
+    borderColor: "#10B981",
+    top: -10,
+    left: -10,
+  },
+  remoteParticipantName: {
+    fontSize: 26,
+    fontWeight: "600",
+    color: "white",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  participantRole: {
+    fontSize: 16,
+    color: "rgba(255,255,255,0.6)",
+    marginBottom: 16,
+  },
+  statusContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
+  },
+  statusText: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 14,
+  },
+
+  localParticipantSection: {
+    alignItems: "center",
+  },
+  localParticipantLabel: {
+    fontSize: 20,
+    fontWeight: "500",
+    color: "rgba(255,255,255,0.9)",
+    marginBottom: 4,
+  },
+  localParticipantName: {
     fontSize: 16,
     color: "rgba(255,255,255,0.6)",
   },
-  participantDisplayMe: {
-    // Positioned towards the bottom, above controls
-    alignItems: "center",
-    // Removed absolute positioning to let flexbox handle it better with space-around
-  },
-  yourIdentifier: {
-    fontSize: 22,
+  speakingIndicator: {
+    fontSize: 12,
+    color: "#10B981",
     fontWeight: "500",
-    color: "rgba(255,255,255,0.85)",
+    marginTop: 4,
   },
-  yourName: {
-    fontSize: 15,
-    color: "rgba(255,255,255,0.55)",
-    marginTop: 3,
+
+  // Controls container
+  controlsContainer: {
+    position: "absolute",
+    bottom: 40,
+    left: 0,
+    right: 0,
+    zIndex: 10,
   },
 });
 
